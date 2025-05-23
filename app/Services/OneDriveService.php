@@ -232,7 +232,7 @@ class OneDriveService
    /**
     * Get files from a specific folder with delta sync support
     */
-   public function getFolderContents(string $sharePointUrl, ?string $folderName = null, ?string $deltaToken = null): array
+   public function getFolderContents(string $sharePointUrl, string $folderName = null, string $deltaToken = null): array
    {
       $token = $this->getValidAccessToken();
 
