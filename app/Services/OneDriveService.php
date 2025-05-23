@@ -2,570 +2,594 @@
 
 namespace App\Services;
 
-use Microsoft\Graph\GraphServiceClient;
-use Microsoft\Kiota\Authentication\Oauth\ClientCredentialContext;
-use Microsoft\Graph\Generated\Models\DriveItem;
-use GuzzleHttp\Client;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Cache;
-use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\Log;
+use ZipArchive;
+use Carbon\Carbon;
 
 class OneDriveService
 {
    protected string $clientId;
    protected string $clientSecret;
-   protected string $tenantId;
    protected string $redirectUri;
-   protected ?string $accessToken = null;
-   protected $graph = null;
+   protected string $authority = 'https://login.microsoftonline.com/common';
+   protected string $graphApiBase = 'https://graph.microsoft.com/v1.0';
 
    public function __construct()
    {
       $this->clientId = config('services.onedrive.client_id');
       $this->clientSecret = config('services.onedrive.client_secret');
-      $this->tenantId = config('services.onedrive.tenant_id', 'common');
+      // $this->tenantId = config('services.onedrive.tenant_id');
       $this->redirectUri = config('services.onedrive.redirect_uri');
    }
 
    /**
-    * Get Microsoft OAuth2 authorization URL for SharePoint access
+    * Get authorization URL for OAuth
     */
    public function getAuthUrl(): string
    {
-      $scopes = 'offline_access https://graph.microsoft.com/Sites.Read.All https://graph.microsoft.com/Files.Read.All https://graph.microsoft.com/User.Read';
-      return 'https://login.microsoftonline.com/' . $this->tenantId . '/oauth2/v2.0/authorize?' . http_build_query([
+      $params = [
          'client_id' => $this->clientId,
          'response_type' => 'code',
          'redirect_uri' => $this->redirectUri,
-         'response_mode' => 'query',
-         'scope' => $scopes,
-      ]);
+         'scope' => 'https://graph.microsoft.com/Files.ReadWrite.All offline_access',
+         'response_mode' => 'query'
+      ];
+
+      return $this->authority . '/oauth2/v2.0/authorize?' . http_build_query($params);
    }
 
    /**
-    * Cache token data
+    * Exchange authorization code for access token
     */
-   protected function cacheTokenData(array $tokenData): void
+   public function getAccessToken(string $code): array
    {
-      $expiresIn = $tokenData['expires_in'] ?? 3600;
+      $response = Http::asForm()->post($this->authority . '/oauth2/v2.0/token', [
+         'client_id' => $this->clientId,
+         'client_secret' => $this->clientSecret,
+         'code' => $code,
+         'redirect_uri' => $this->redirectUri,
+         'grant_type' => 'authorization_code',
+      ]);
 
-      Cache::put('onedrive_access_token', $tokenData['access_token'], now()->addSeconds($expiresIn - 300));
+      if ($response->successful()) {
+         $tokenData = $response->json();
 
-      if (isset($tokenData['refresh_token'])) {
-         Cache::put('onedrive_refresh_token', $tokenData['refresh_token'], now()->addDays(30));
+         // Store tokens in cache
+         Cache::put('onedrive_access_token', $tokenData['access_token'], now()->addSeconds($tokenData['expires_in'] - 300));
+         Cache::put('onedrive_refresh_token', $tokenData['refresh_token'], now()->addDays(90));
+
+         return $tokenData;
       }
 
-      $this->accessToken = $tokenData['access_token'];
+      throw new \Exception('Failed to get access token: ' . $response->body());
    }
 
    /**
-    * Get access token from authorization code
-    */
-   public function getAccessToken(string $authCode): array
-   {
-      $client = new Client();
-      $response = $client->post("https://login.microsoftonline.com/{$this->tenantId}/oauth2/v2.0/token", [
-         'form_params' => [
-            'client_id' => $this->clientId,
-            'client_secret' => $this->clientSecret,
-            'grant_type' => 'credentials',
-            // 'code' => $authCode,
-            'redirect_uri' => $this->redirectUri,
-            'scope' => 'offline_access https://graph.microsoft.com/Sites.Read.All https://graph.microsoft.com/Files.Read.All https://graph.microsoft.com/User.Read',
-         ],
-      ]);
-
-      $tokenData = json_decode((string) $response->getBody(), true);
-      $this->cacheTokenData($tokenData);
-
-      return $tokenData;
-   }
-
-   /**
-    * Refresh the access token using the refresh token
+    * Refresh access token using refresh token
     */
    public function refreshAccessToken(): bool
    {
       $refreshToken = Cache::get('onedrive_refresh_token');
 
       if (!$refreshToken) {
-         Log::error('No refresh token available. User needs to login again.');
          return false;
       }
 
-      try {
-         $client = new Client();
-         $response = $client->post("https://login.microsoftonline.com/{$this->tenantId}/oauth2/v2.0/token", [
-            'form_params' => [
-               'client_id' => $this->clientId,
-               'client_secret' => $this->clientSecret,
-               'grant_type' => 'refresh_token',
-               'refresh_token' => $refreshToken,
-               'scope' => 'offline_access https://graph.microsoft.com/Sites.Read.All https://graph.microsoft.com/Files.Read.All https://graph.microsoft.com/User.Read',
-            ],
-         ]);
+      $response = Http::asForm()->post($this->authority . '/oauth2/v2.0/token', [
+         'client_id' => $this->clientId,
+         'client_secret' => $this->clientSecret,
+         'refresh_token' => $refreshToken,
+         'grant_type' => 'refresh_token',
+      ]);
 
-         $tokenData = json_decode((string) $response->getBody(), true);
-         $this->cacheTokenData($tokenData);
+      if ($response->successful()) {
+         $tokenData = $response->json();
+
+         Cache::put('onedrive_access_token', $tokenData['access_token'], now()->addSeconds($tokenData['expires_in'] - 300));
+
+         if (isset($tokenData['refresh_token'])) {
+            Cache::put('onedrive_refresh_token', $tokenData['refresh_token'], now()->addDays(90));
+         }
 
          return true;
-      } catch (\Exception $e) {
-         Log::error('Failed to refresh access token: ' . $e->getMessage());
-         Cache::forget('onedrive_access_token');
-         Cache::forget('onedrive_refresh_token');
-         return false;
       }
+
+      return false;
    }
 
    /**
-    * Get a valid access token
+    * Get valid access token (refresh if needed)
     */
    public function getValidAccessToken(): ?string
    {
       $token = Cache::get('onedrive_access_token');
 
-      if (!$token && !$this->refreshAccessToken()) {
-         return null;
+      if ($token) {
+         return $token;
       }
 
-      return Cache::get('onedrive_access_token');
-   }
-
-   /**
-    * Initialize access token for requests
-    */
-   protected function initializeAuth(): bool
-   {
-      $this->accessToken = $this->getValidAccessToken();
-
-      if (!$this->accessToken) {
-         Log::error('No valid access token available');
-         return false;
+      if ($this->refreshAccessToken()) {
+         return Cache::get('onedrive_access_token');
       }
 
-      return true;
-   }
-
-   /**
-    * Parse SharePoint sharing URL to extract encoded sharing information
-    */
-   protected function parseSharePointUrl(string $url): ?array
-   {
-      // For sharing URLs, we need to decode the sharing token
-      if (preg_match('/https:\/\/([^\/]+)-my\.sharepoint\.com\/:f:\/g\/personal\/([^\/]+)\/([^?]+)/', $url, $matches)) {
-         $tenantName = $matches[1];
-         $userPath = $matches[2];
-         $resourceId = $matches[3];
-
-         return [
-            'tenantName' => $tenantName,
-            'userPath' => $userPath,
-            'resourceId' => $resourceId,
-            'siteUrl' => "https://{$tenantName}-my.sharepoint.com/personal/{$userPath}",
-            'hostname' => "{$tenantName}-my.sharepoint.com",
-            'sitePath' => "/personal/{$userPath}"
-         ];
-      }
-
-      Log::error('Could not parse SharePoint URL: ' . $url);
       return null;
    }
 
    /**
-    * Make authenticated Graph API request
+    * Test connection to OneDrive
     */
-   protected function makeGraphRequest(string $endpoint): ?array
+   public function testConnection(): array
    {
-      if (!$this->accessToken) {
-         Log::error('No access token available for Graph request');
-         return null;
+      $token = $this->getValidAccessToken();
+
+      if (!$token) {
+         return ['error' => 'No valid access token available'];
       }
 
-      try {
-         $client = new Client();
-         $response = $client->get("https://graph.microsoft.com/v1.0/{$endpoint}", [
-            'headers' => [
-               'Authorization' => 'Bearer ' . $this->accessToken,
-               'Accept' => 'application/json',
-            ],
-         ]);
+      $response = Http::withToken($token)->get($this->graphApiBase . '/me');
 
-         return json_decode($response->getBody()->getContents(), true);
-      } catch (\Exception $e) {
-         Log::error("Graph API request failed for {$endpoint}: " . $e->getMessage());
-
-         // If it's a 401, try to refresh the token
-         if (strpos($e->getMessage(), '401') !== false) {
-            if ($this->refreshAccessToken()) {
-               return $this->makeGraphRequest($endpoint);
-            }
-         }
-
-         return null;
+      if ($response->successful()) {
+         $user = $response->json();
+         return [
+            'success' => true,
+            'user' => $user['displayName'] ?? 'Unknown',
+            'email' => $user['mail'] ?? $user['userPrincipalName'] ?? 'Unknown'
+         ];
       }
+
+      return ['error' => 'Failed to connect to OneDrive: ' . $response->status()];
    }
 
    /**
-    * Get site information from SharePoint URL
+    * Extract SharePoint site and folder information from URL
     */
-   protected function getSiteInfo(string $hostname, string $sitePath): ?array
+   protected function parseSharePointUrl(string $url): array
    {
-      // Clean up the site path
-      $sitePath = ltrim($sitePath, '/');
+      // Extract site ID and folder path from SharePoint URL
+      if (preg_match('/https:\/\/([^\/]+)-my\.sharepoint\.com\/.*\/personal\/([^\/]+)\/.*\/([^\/\?]+)/', $url, $matches)) {
+         $tenant = $matches[1];
+         $user = $matches[2];
 
-      // Get site by hostname and path
-      $endpoint = "sites/{$hostname}:/{$sitePath}";
+         return [
+            'tenant' => $tenant,
+            'user' => $user,
+            'site_url' => "https://{$tenant}-my.sharepoint.com/personal/{$user}",
+            'type' => 'personal'
+         ];
+      }
 
-      Log::info("Requesting site info from endpoint: {$endpoint}");
-
-      return $this->makeGraphRequest($endpoint);
+      throw new \Exception('Could not parse SharePoint URL');
    }
 
    /**
-    * Get shared item from sharing URL
+    * List files in SharePoint folder
     */
-   protected function getSharedItem(string $shareUrl): ?array
+   public function listSharePointFiles(string $sharePointUrl): array
    {
-      try {
-         // Encode the sharing URL
-         $encodedUrl = base64_encode($shareUrl);
-         $encodedUrl = rtrim($encodedUrl, '=');
-         $encodedUrl = 'u!' . strtr($encodedUrl, '+/', '-_');
+      $token = $this->getValidAccessToken();
 
-         $endpoint = "shares/{$encodedUrl}/driveItem";
-
-         Log::info("Requesting shared item from endpoint: {$endpoint}");
-
-         return $this->makeGraphRequest($endpoint);
-      } catch (\Exception $e) {
-         Log::error('Error getting shared item: ' . $e->getMessage());
-         return null;
-      }
-   }
-
-   /**
-    * Get folder contents from SharePoint
-    */
-   public function getSharePointFolderContents(string $sharePointUrl): ?array
-   {
-      if (!$this->initializeAuth()) {
-         return null;
+      if (!$token) {
+         return ['error' => 'No valid access token available'];
       }
 
       try {
-         // First, try to access the shared item directly
-         $sharedItem = $this->getSharedItem($sharePointUrl);
-
-         if ($sharedItem && isset($sharedItem['id'])) {
-            Log::info("Successfully accessed shared item: " . $sharedItem['name']);
-
-            // Get children of the shared folder
-            $endpoint = "shares/" . base64_encode($sharePointUrl) . "/driveItem/children";
-            $encodedUrl = base64_encode($sharePointUrl);
-            $encodedUrl = rtrim($encodedUrl, '=');
-            $encodedUrl = 'u!' . strtr($encodedUrl, '+/', '-_');
-
-            $endpoint = "shares/{$encodedUrl}/driveItem/children";
-            $items = $this->makeGraphRequest($endpoint);
-
-            return $items['value'] ?? [];
-         }
-
-         // Fallback: try parsing URL and accessing via site
          $parsedUrl = $this->parseSharePointUrl($sharePointUrl);
-         if (!$parsedUrl) {
-            return null;
-         }
 
          // Get site information
-         $siteInfo = $this->getSiteInfo($parsedUrl['hostname'], $parsedUrl['sitePath']);
+         $siteResponse = Http::withToken($token)
+            ->get($this->graphApiBase . "/sites/{$parsedUrl['tenant']}-my.sharepoint.com:/personal/{$parsedUrl['user']}");
 
-         if (!$siteInfo) {
-            Log::error('Could not get site information');
-            return null;
+         if (!$siteResponse->successful()) {
+            return ['error' => 'Failed to access SharePoint site: ' . $siteResponse->status()];
          }
 
-         Log::info("Site ID: " . $siteInfo['id']);
+         $siteId = $siteResponse->json()['id'];
 
-         $siteId = $siteInfo['id'];
+         // Get drive
+         $driveResponse = Http::withToken($token)
+            ->get($this->graphApiBase . "/sites/{$siteId}/drive");
 
-         // Get the site's default drive
-         $driveEndpoint = "sites/{$siteId}/drive";
-         $driveInfo = $this->makeGraphRequest($driveEndpoint);
-
-         if (!$driveInfo) {
-            Log::error('Could not get drive information');
-            return null;
+         if (!$driveResponse->successful()) {
+            return ['error' => 'Failed to access drive: ' . $driveResponse->status()];
          }
 
-         Log::info("Drive ID: " . $driveInfo['id']);
+         $driveId = $driveResponse->json()['id'];
 
-         // Get root items from the drive
-         $itemsEndpoint = "sites/{$siteId}/drive/root/children";
-         $items = $this->makeGraphRequest($itemsEndpoint);
+         // List root folder contents
+         $filesResponse = Http::withToken($token)
+            ->get($this->graphApiBase . "/sites/{$siteId}/drives/{$driveId}/root/children");
 
-         return $items['value'] ?? [];
+         if (!$filesResponse->successful()) {
+            return ['error' => 'Failed to list files: ' . $filesResponse->status()];
+         }
+
+         $items = $filesResponse->json()['value'] ?? [];
+         $files = [];
+
+         foreach ($items as $item) {
+            $files[] = [
+               'id' => $item['id'],
+               'name' => $item['name'],
+               'type' => isset($item['folder']) ? 'folder' : 'file',
+               'size' => $item['size'] ?? 0,
+               'lastModified' => $item['lastModifiedDateTime'] ?? null,
+               'downloadUrl' => $item['@microsoft.graph.downloadUrl'] ?? null,
+               'childCount' => $item['folder']['childCount'] ?? 0,
+               'webUrl' => $item['webUrl'] ?? null
+            ];
+         }
+
+         return $files;
       } catch (\Exception $e) {
-         Log::error('Error getting SharePoint folder contents: ' . $e->getMessage());
-         return null;
+         Log::error('SharePoint listing error: ' . $e->getMessage());
+         return ['error' => $e->getMessage()];
       }
    }
 
    /**
-    * Download files from SharePoint folder
+    * Get files from a specific folder with delta sync support
     */
-   public function downloadFlashFolders(string $localBasePath = 'flashfiles'): array
+   public function getFolderContents(string $sharePointUrl, ?string $folderName = null, ?string $deltaToken = null): array
+   {
+      $token = $this->getValidAccessToken();
+
+      if (!$token) {
+         return ['error' => 'No valid access token available'];
+      }
+
+      try {
+         $parsedUrl = $this->parseSharePointUrl($sharePointUrl);
+
+         // Get site and drive IDs
+         $siteResponse = Http::withToken($token)
+            ->get($this->graphApiBase . "/sites/{$parsedUrl['tenant']}-my.sharepoint.com:/personal/{$parsedUrl['user']}");
+
+         if (!$siteResponse->successful()) {
+            return ['error' => 'Failed to access SharePoint site'];
+         }
+
+         $siteId = $siteResponse->json()['id'];
+
+         $driveResponse = Http::withToken($token)
+            ->get($this->graphApiBase . "/sites/{$siteId}/drive");
+
+         if (!$driveResponse->successful()) {
+            return ['error' => 'Failed to access drive'];
+         }
+
+         $driveId = $driveResponse->json()['id'];
+
+         // Build the endpoint URL
+         $endpoint = $this->graphApiBase . "/sites/{$siteId}/drives/{$driveId}/root";
+
+         if ($folderName) {
+            $endpoint .= ":/{$folderName}:";
+         }
+
+         // Use delta endpoint if delta token is provided
+         if ($deltaToken) {
+            $endpoint .= "/delta?token=" . urlencode($deltaToken);
+         } else {
+            $endpoint .= "/children";
+         }
+
+         $response = Http::withToken($token)->get($endpoint);
+
+         if (!$response->successful()) {
+            return ['error' => 'Failed to get folder contents: ' . $response->status()];
+         }
+
+         $data = $response->json();
+         $items = $data['value'] ?? [];
+         $files = [];
+
+         foreach ($items as $item) {
+            // Skip deleted items in delta sync
+            if (isset($item['deleted'])) {
+               continue;
+            }
+
+            $files[] = [
+               'id' => $item['id'],
+               'name' => $item['name'],
+               'type' => isset($item['folder']) ? 'folder' : 'file',
+               'size' => $item['size'] ?? 0,
+               'lastModified' => $item['lastModifiedDateTime'] ?? null,
+               'downloadUrl' => $item['@microsoft.graph.downloadUrl'] ?? null,
+               'eTag' => $item['eTag'] ?? null,
+               'webUrl' => $item['webUrl'] ?? null
+            ];
+         }
+
+         return [
+            'files' => $files,
+            'deltaToken' => $data['@odata.deltaLink'] ?? null,
+            'nextLink' => $data['@odata.nextLink'] ?? null
+         ];
+      } catch (\Exception $e) {
+         Log::error('Folder contents error: ' . $e->getMessage());
+         return ['error' => $e->getMessage()];
+      }
+   }
+
+   /**
+    * Download multiple files as ZIP
+    */
+   public function downloadFilesAsZip(array $files, string $zipName): array
+   {
+      $token = $this->getValidAccessToken();
+
+      if (!$token) {
+         return ['success' => false, 'error' => 'No valid access token available'];
+      }
+
+      $zipPath = storage_path("app/temp/{$zipName}.zip");
+      $tempDir = storage_path('app/temp');
+
+      // Ensure temp directory exists
+      if (!is_dir($tempDir)) {
+         mkdir($tempDir, 0755, true);
+      }
+
+      $zip = new ZipArchive();
+      $result = $zip->open($zipPath, ZipArchive::CREATE | ZipArchive::OVERWRITE);
+
+      if ($result !== TRUE) {
+         return ['success' => false, 'error' => 'Could not create ZIP file'];
+      }
+
+      $downloadedFiles = [];
+      $errors = [];
+
+      foreach ($files as $file) {
+         if ($file['type'] === 'file' && !empty($file['downloadUrl'])) {
+            try {
+               $response = Http::timeout(300)->get($file['downloadUrl']);
+
+               if ($response->successful()) {
+                  $zip->addFromString($file['name'], $response->body());
+                  $downloadedFiles[] = $file['name'];
+                  Log::info("Added {$file['name']} to ZIP");
+               } else {
+                  $errors[] = "Failed to download {$file['name']}: HTTP {$response->status()}";
+               }
+            } catch (\Exception $e) {
+               $errors[] = "Error downloading {$file['name']}: " . $e->getMessage();
+            }
+         }
+      }
+
+      $zip->close();
+
+      if (empty($downloadedFiles)) {
+         @unlink($zipPath);
+         return [
+            'success' => false,
+            'error' => 'No files were added to ZIP',
+            'errors' => $errors
+         ];
+      }
+
+      return [
+         'success' => true,
+         'zipPath' => $zipPath,
+         'filesCount' => count($downloadedFiles),
+         'downloadedFiles' => $downloadedFiles,
+         'errors' => $errors
+      ];
+   }
+
+   /**
+    * Extract ZIP file to specified directory
+    */
+   public function extractZipToDirectory(string $zipPath, string $extractPath): array
+   {
+      if (!file_exists($zipPath)) {
+         return ['success' => false, 'error' => 'ZIP file not found'];
+      }
+
+      // Ensure extract directory exists
+      if (!is_dir($extractPath)) {
+         mkdir($extractPath, 0755, true);
+      }
+
+      $zip = new ZipArchive();
+      $result = $zip->open($zipPath);
+
+      if ($result !== TRUE) {
+         return ['success' => false, 'error' => 'Could not open ZIP file'];
+      }
+
+      $extractedFiles = [];
+
+      for ($i = 0; $i < $zip->numFiles; $i++) {
+         $filename = $zip->getNameIndex($i);
+         $fileInfo = $zip->statIndex($i);
+
+         if ($zip->extractTo($extractPath, $filename)) {
+            $extractedFiles[] = [
+               'name' => $filename,
+               'size' => $fileInfo['size'],
+               'path' => $extractPath . '/' . $filename
+            ];
+         }
+      }
+
+      $zip->close();
+
+      // Clean up ZIP file
+      @unlink($zipPath);
+
+      return [
+         'success' => true,
+         'extractedFiles' => $extractedFiles,
+         'totalFiles' => count($extractedFiles)
+      ];
+   }
+
+   /**
+    * Enhanced sync with ZIP download and delta sync
+    */
+   public function fetchFlashFiles(string $localPath = 'flashfiles'): array
    {
       $sharePointUrl = 'https://csfsoftware-my.sharepoint.com/:f:/g/personal/daviddieter_csfsoftware_onmicrosoft_com/Em0UIzXicIVKkWAh31GM1BYBfmalbmPCiAzeElLPSI4N2w?e=gj8mbh';
 
       $result = [
          'success' => false,
-         'downloaded' => [],
-         'errors' => [],
-         'message' => ''
+         'message' => '',
+         'mod_files' => null,
+         'ori_files' => null,
+         'errors' => []
       ];
 
-      if (!$this->initializeAuth()) {
-         $result['errors'][] = 'Failed to initialize authentication';
-         $result['message'] = 'Authentication error: No valid access token available';
-         return $result;
-      }
-
-      // Ensure base directory exists
-      if (!Storage::exists($localBasePath)) {
-         Storage::makeDirectory($localBasePath);
-      }
-
-      // Get folder contents
-      $items = $this->getSharePointFolderContents($sharePointUrl);
-
-      if (!$items) {
-         $result['errors'][] = 'Could not access SharePoint folder';
-         $result['message'] = 'Failed to retrieve folder contents from SharePoint';
-         return $result;
-      }
-
-      Log::info("Found " . count($items) . " items in SharePoint folder");
-
-      // Process items
-      foreach ($items as $item) {
-         if (isset($item['file']) && preg_match('/\.(fls|FLS)$/i', $item['name'])) {
-            $this->downloadFileFromSharePoint($item, $localBasePath, $result);
-         } elseif (isset($item['folder'])) {
-            // Handle subfolders if needed
-            $this->processSharePointSubfolder($item, $localBasePath, $result);
+      try {
+         // Get MOD folder files
+         $modResult = $this->syncFolderWithZip($sharePointUrl, 'MOD', 'mod-files');
+         if ($modResult['success']) {
+            $result['mod_files'] = $modResult;
+         } else {
+            $result['errors'][] = 'MOD folder sync failed: ' . ($modResult['error'] ?? 'Unknown error');
          }
-      }
 
-      $result['success'] = count($result['downloaded']) > 0;
-      if ($result['success']) {
-         $result['message'] = count($result['downloaded']) . ' files downloaded successfully';
-      } else {
-         $result['message'] = 'No .fls files found to download';
+         // Get ORI folder files
+         $oriResult = $this->syncFolderWithZip($sharePointUrl, 'ORI', 'ori-files');
+         if ($oriResult['success']) {
+            $result['ori_files'] = $oriResult;
+         } else {
+            $result['errors'][] = 'ORI folder sync failed: ' . ($oriResult['error'] ?? 'Unknown error');
+         }
+
+         // Determine overall success
+         $result['success'] = !empty($result['mod_files']) || !empty($result['ori_files']);
+
+         if ($result['success']) {
+            $result['message'] = 'Files synchronized successfully with ZIP optimization';
+         } else {
+            $result['message'] = 'Sync failed for all folders';
+         }
+      } catch (\Exception $e) {
+         $result['errors'][] = 'General sync error: ' . $e->getMessage();
+         $result['message'] = 'Sync failed with exception';
+         Log::error('Flash files sync error: ' . $e->getMessage());
       }
 
       return $result;
    }
 
    /**
-    * Download a single file from SharePoint
+    * Sync specific folder with ZIP optimization and delta sync
     */
-   protected function downloadFileFromSharePoint(array $item, string $localBasePath, array &$result): void
+   protected function syncFolderWithZip(string $sharePointUrl, string $folderName, string $localDir): array
    {
-      try {
-         $fileName = $item['name'];
-         $downloadUrl = $item['@microsoft.graph.downloadUrl'] ?? null;
+      // Get stored delta token for this folder
+      $deltaTokenKey = "onedrive_delta_{$folderName}";
+      $deltaToken = Cache::get($deltaTokenKey);
 
-         if (!$downloadUrl && isset($item['id'])) {
-            // Try to get download URL via Graph API
-            $fileEndpoint = "me/drive/items/{$item['id']}/content";
+      // Get folder contents (with delta if available)
+      $folderData = $this->getFolderContents($sharePointUrl, $folderName, $deltaToken);
 
-            try {
-               $client = new Client();
-               $response = $client->get("https://graph.microsoft.com/v1.0/{$fileEndpoint}", [
-                  'headers' => [
-                     'Authorization' => 'Bearer ' . $this->accessToken,
-                  ],
-                  'allow_redirects' => false
-               ]);
-
-               // Get the redirect location
-               $downloadUrl = $response->getHeader('Location')[0] ?? null;
-            } catch (\Exception $e) {
-               Log::error("Error getting download URL for {$fileName}: " . $e->getMessage());
-            }
-         }
-
-         if ($downloadUrl) {
-            $client = new Client();
-            $response = $client->get($downloadUrl);
-
-            $filePath = "{$localBasePath}/{$fileName}";
-            Storage::put($filePath, $response->getBody()->getContents());
-
-            $result['downloaded'][] = [
-               'file' => $fileName,
-               'size' => $item['size'] ?? 0,
-               'path' => $filePath
-            ];
-
-            Log::info("Downloaded {$filePath}");
-         } else {
-            $result['errors'][] = "Could not get download URL for {$fileName}";
-         }
-      } catch (\Exception $e) {
-         $result['errors'][] = "Error downloading {$item['name']}: " . $e->getMessage();
-         Log::error("Error downloading {$item['name']}: " . $e->getMessage());
-      }
-   }
-
-   /**
-    * Process SharePoint subfolders
-    */
-   protected function processSharePointSubfolder(array $folder, string $localBasePath, array &$result): void
-   {
-      try {
-         $folderName = $folder['name'];
-         $folderPath = "{$localBasePath}/{$folderName}";
-
-         if (!Storage::exists($folderPath)) {
-            Storage::makeDirectory($folderPath);
-         }
-
-         // Get subfolder contents
-         if (isset($folder['id'])) {
-            $subfolderEndpoint = "me/drive/items/{$folder['id']}/children";
-            $subItems = $this->makeGraphRequest($subfolderEndpoint);
-
-            if ($subItems && isset($subItems['value'])) {
-               foreach ($subItems['value'] as $subItem) {
-                  if (isset($subItem['file']) && preg_match('/\.(fls|FLS)$/i', $subItem['name'])) {
-                     $this->downloadFileFromSharePoint($subItem, $folderPath, $result);
-                  }
-               }
-            }
-         }
-      } catch (\Exception $e) {
-         Log::error("Error processing subfolder {$folder['name']}: " . $e->getMessage());
-      }
-   }
-
-   /**
-    * Get all files from the SharePoint folder
-    */
-   public function fetchFlashFiles(string $localBasePath = 'flashfiles'): array
-   {
-      return $this->downloadFlashFolders($localBasePath);
-   }
-
-   /**
-    * List files in SharePoint folder without downloading
-    */
-   public function listSharePointFiles(string $sharePointUrl): array
-   {
-      if (!$this->initializeAuth()) {
-         return ['error' => 'Failed to initialize authentication'];
+      if (isset($folderData['error'])) {
+         return ['success' => false, 'error' => $folderData['error']];
       }
 
-      $items = $this->getSharePointFolderContents($sharePointUrl);
+      $files = $folderData['files'] ?? [];
+      $newDeltaToken = $folderData['deltaToken'];
 
-      if (!$items) {
-         return ['error' => 'Could not access SharePoint folder'];
-      }
+      // Filter for flash files (.fls)
+      $flashFiles = array_filter($files, function ($file) {
+         return $file['type'] === 'file' && preg_match('/\.(fls|FLS)$/i', $file['name']);
+      });
 
-      $fileList = [];
-      foreach ($items as $item) {
-         if (isset($item['file'])) {
-            $fileList[] = [
-               'name' => $item['name'],
-               'size' => $item['size'] ?? 0,
-               'lastModified' => $item['lastModifiedDateTime'] ?? null,
-               'type' => 'file'
-            ];
-         } elseif (isset($item['folder'])) {
-            $fileList[] = [
-               'name' => $item['name'],
-               'type' => 'folder',
-               'childCount' => $item['folder']['childCount'] ?? 0
-            ];
-         }
-      }
-
-      return $fileList;
-   }
-
-   /**
-    * Debug method to test authentication and basic Graph API access
-    */
-   public function testConnection(): array
-   {
-      if (!$this->initializeAuth()) {
-         return ['error' => 'Authentication failed'];
-      }
-
-      // Test basic Graph API access
-      $userInfo = $this->makeGraphRequest('me');
-
-      if ($userInfo) {
+      if (empty($flashFiles)) {
          return [
             'success' => true,
-            'user' => $userInfo['displayName'] ?? 'Unknown',
-            'email' => $userInfo['mail'] ?? $userInfo['userPrincipalName'] ?? 'Unknown'
+            'files_count' => 0,
+            'is_incremental' => !empty($deltaToken),
+            'message' => "No .fls files found in {$folderName} folder"
          ];
       }
 
-      return ['error' => 'Could not access Graph API'];
+      // Download files as ZIP
+      $zipResult = $this->downloadFilesAsZip($flashFiles, "{$folderName}_files_" . date('Y-m-d_H-i-s'));
+
+      if (!$zipResult['success']) {
+         return ['success' => false, 'error' => $zipResult['error'] ?? 'ZIP download failed'];
+      }
+
+      // Extract ZIP to local directory
+      $extractPath = storage_path("app/{$localDir}");
+      $extractResult = $this->extractZipToDirectory($zipResult['zipPath'], $extractPath);
+
+      if (!$extractResult['success']) {
+         return ['success' => false, 'error' => $extractResult['error'] ?? 'ZIP extraction failed'];
+      }
+
+      // Store new delta token for future incremental syncs
+      if ($newDeltaToken) {
+         Cache::put($deltaTokenKey, $newDeltaToken, now()->addDays(30));
+      }
+
+      // Update sync statistics
+      $this->updateSyncStats($folderName, count($flashFiles), $extractResult['totalFiles']);
+
+      return [
+         'success' => true,
+         'files_count' => $extractResult['totalFiles'],
+         'is_incremental' => !empty($deltaToken),
+         'extracted_files' => $extractResult['extractedFiles'],
+         'errors' => $zipResult['errors'] ?? []
+      ];
    }
 
-
-   // More Added
-
    /**
-    * Get folder data by URL (wrapper method for consistency)
+    * Force full sync by clearing delta tokens
     */
-   public function getFolderByUrl(string $url): array
+   public function forceFullSync(): array
    {
-      // Check if it's a SharePoint URL
-      if (strpos($url, 'sharepoint.com') !== false) {
-         return $this->listSharePointFiles($url);
-      }
+      // Clear delta tokens to force full sync
+      Cache::forget('onedrive_delta_MOD');
+      Cache::forget('onedrive_delta_ORI');
 
-      // Check if it's a personal OneDrive URL
-      if (strpos($url, 'onedrive.live.com') !== false) {
-         // Personal OneDrive URLs need different handling
-         return ['error' => 'Personal OneDrive URLs not supported yet'];
-      }
+      Log::info('Delta tokens cleared, forcing full sync');
 
-      return ['error' => 'Unsupported URL format'];
+      return $this->fetchFlashFiles();
    }
 
    /**
-    * Download files from specific folders
+    * Get sync status and statistics
     */
-   public function downloadSpecificFolders(array $folderNames, string $localBasePath): bool
+   public function getSyncStatus(): array
    {
-      // This is a placeholder implementation
-      // You would need to implement the logic based on your specific requirements
+      return [
+         'last_mod_sync' => Cache::get('last_sync_MOD'),
+         'last_ori_sync' => Cache::get('last_sync_ORI'),
+         'mod_files_count' => Cache::get('sync_stats_MOD_count', 0),
+         'ori_files_count' => Cache::get('sync_stats_ORI_count', 0),
+         'has_mod_delta' => Cache::has('onedrive_delta_MOD'),
+         'has_ori_delta' => Cache::has('onedrive_delta_ORI'),
+         'token_expires' => Cache::get('onedrive_access_token') ? 'Valid' : 'Expired'
+      ];
+   }
 
-      $success = true;
-      foreach ($folderNames as $folderName) {
-         try {
-            // Here you would implement the logic to download from specific folders
-            Log::info("Processing folder: {$folderName}");
+   /**
+    * Update sync statistics
+    */
+   protected function updateSyncStats(string $folder, int $totalFiles, int $syncedFiles): void
+   {
+      $timestamp = now()->toISOString();
+      Cache::put("last_sync_{$folder}", $timestamp, now()->addDays(30));
+      Cache::put("sync_stats_{$folder}_count", $syncedFiles, now()->addDays(30));
+      Cache::put("sync_stats_{$folder}_total", $totalFiles, now()->addDays(30));
+   }
 
-            // For now, just use the existing download functionality
-            if ($folderName === 'MOD Flash') {
-               $result = $this->fetchFlashFiles($localBasePath . '/' . strtolower(str_replace(' ', '_', $folderName)));
-               if (!$result['success']) {
-                  $success = false;
-               }
-            }
-         } catch (\Exception $e) {
-            Log::error("Error processing folder {$folderName}: " . $e->getMessage());
-            $success = false;
-         }
-      }
-
-      return $success;
+   /**
+    * Legacy method for backward compatibility
+    */
+   public function downloadFlashFolders(string $localPath = 'flashfiles'): array
+   {
+      return $this->fetchFlashFiles($localPath);
    }
 }
