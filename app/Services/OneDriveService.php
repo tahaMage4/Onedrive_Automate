@@ -68,8 +68,7 @@ class OneDriveService
          'form_params' => [
             'client_id' => $this->clientId,
             'client_secret' => $this->clientSecret,
-            'grant_type' => 'credentials',
-            // 'code' => $authCode,
+            'grant_type' => 'client_credentials',
             'redirect_uri' => $this->redirectUri,
             'scope' => 'offline_access https://graph.microsoft.com/Sites.Read.All https://graph.microsoft.com/Files.Read.All https://graph.microsoft.com/User.Read',
          ],
@@ -151,7 +150,6 @@ class OneDriveService
     */
    protected function parseSharePointUrl(string $url): ?array
    {
-      // For sharing URLs, we need to decode the sharing token
       if (preg_match('/https:\/\/([^\/]+)-my\.sharepoint\.com\/:f:\/g\/personal\/([^\/]+)\/([^?]+)/', $url, $matches)) {
          $tenantName = $matches[1];
          $userPath = $matches[2];
@@ -194,7 +192,6 @@ class OneDriveService
       } catch (\Exception $e) {
          Log::error("Graph API request failed for {$endpoint}: " . $e->getMessage());
 
-         // If it's a 401, try to refresh the token
          if (strpos($e->getMessage(), '401') !== false) {
             if ($this->refreshAccessToken()) {
                return $this->makeGraphRequest($endpoint);
@@ -210,14 +207,9 @@ class OneDriveService
     */
    protected function getSiteInfo(string $hostname, string $sitePath): ?array
    {
-      // Clean up the site path
       $sitePath = ltrim($sitePath, '/');
-
-      // Get site by hostname and path
       $endpoint = "sites/{$hostname}:/{$sitePath}";
-
       Log::info("Requesting site info from endpoint: {$endpoint}");
-
       return $this->makeGraphRequest($endpoint);
    }
 
@@ -227,13 +219,11 @@ class OneDriveService
    protected function getSharedItem(string $shareUrl): ?array
    {
       try {
-         // Encode the sharing URL
          $encodedUrl = base64_encode($shareUrl);
          $encodedUrl = rtrim($encodedUrl, '=');
          $encodedUrl = 'u!' . strtr($encodedUrl, '+/', '-_');
 
          $endpoint = "shares/{$encodedUrl}/driveItem";
-
          Log::info("Requesting shared item from endpoint: {$endpoint}");
 
          return $this->makeGraphRequest($endpoint);
@@ -253,14 +243,11 @@ class OneDriveService
       }
 
       try {
-         // First, try to access the shared item directly
          $sharedItem = $this->getSharedItem($sharePointUrl);
 
          if ($sharedItem && isset($sharedItem['id'])) {
             Log::info("Successfully accessed shared item: " . $sharedItem['name']);
 
-            // Get children of the shared folder
-            $endpoint = "shares/" . base64_encode($sharePointUrl) . "/driveItem/children";
             $encodedUrl = base64_encode($sharePointUrl);
             $encodedUrl = rtrim($encodedUrl, '=');
             $encodedUrl = 'u!' . strtr($encodedUrl, '+/', '-_');
@@ -271,25 +258,21 @@ class OneDriveService
             return $items['value'] ?? [];
          }
 
-         // Fallback: try parsing URL and accessing via site
+         // Fallback method
          $parsedUrl = $this->parseSharePointUrl($sharePointUrl);
          if (!$parsedUrl) {
             return null;
          }
 
-         // Get site information
          $siteInfo = $this->getSiteInfo($parsedUrl['hostname'], $parsedUrl['sitePath']);
-
          if (!$siteInfo) {
             Log::error('Could not get site information');
             return null;
          }
 
          Log::info("Site ID: " . $siteInfo['id']);
-
          $siteId = $siteInfo['id'];
 
-         // Get the site's default drive
          $driveEndpoint = "sites/{$siteId}/drive";
          $driveInfo = $this->makeGraphRequest($driveEndpoint);
 
@@ -300,7 +283,6 @@ class OneDriveService
 
          Log::info("Drive ID: " . $driveInfo['id']);
 
-         // Get root items from the drive
          $itemsEndpoint = "sites/{$siteId}/drive/root/children";
          $items = $this->makeGraphRequest($itemsEndpoint);
 
@@ -312,16 +294,70 @@ class OneDriveService
    }
 
    /**
-    * Download files from SharePoint folder
+    * Check which files are already present locally
     */
+   protected function getExistingLocalFiles(string $localPath): array
+   {
+      $existingFiles = [];
+
+      try {
+         if (Storage::exists($localPath)) {
+            $files = Storage::allFiles($localPath);
+
+            foreach ($files as $file) {
+               $fileName = basename($file);
+               $filePath = Storage::path($file);
+               $fileSize = file_exists($filePath) ? filesize($filePath) : 0;
+
+               $existingFiles[$fileName] = [
+                  'path' => $file,
+                  'size' => $fileSize,
+                  'name' => $fileName
+               ];
+            }
+         }
+      } catch (\Exception $e) {
+         Log::error("Error checking existing files in {$localPath}: " . $e->getMessage());
+      }
+
+      Log::info("Found " . count($existingFiles) . " existing files in {$localPath}");
+      return $existingFiles;
+   }
+
    /**
-    * Download files from SharePoint folder to specified local path
+    * Check if file needs to be downloaded (missing or different size)
+    */
+   protected function shouldDownloadFile(array $remoteFile, array $existingFiles): bool
+   {
+      $fileName = $remoteFile['name'];
+
+      // If file doesn't exist locally, download it
+      if (!isset($existingFiles[$fileName])) {
+         return true;
+      }
+
+      // Check file size difference (basic integrity check)
+      $remoteSize = $remoteFile['size'] ?? 0;
+      $localSize = $existingFiles[$fileName]['size'] ?? 0;
+
+      if ($remoteSize !== $localSize) {
+         Log::info("File size mismatch for {$fileName}: remote={$remoteSize}, local={$localSize}");
+         return true;
+      }
+
+      // File exists and sizes match, skip download
+      return false;
+   }
+
+   /**
+    * Download files from SharePoint folder with incremental sync
     */
    public function downloadFlashFolders(string $localPath, string $shareUrl): array
    {
       $result = [
          'success' => false,
          'downloaded' => [],
+         'skipped' => [],
          'errors' => [],
          'message' => ''
       ];
@@ -332,7 +368,10 @@ class OneDriveService
          return $result;
       }
 
-      // Get folder contents
+      // Get existing local files
+      $existingFiles = $this->getExistingLocalFiles($localPath);
+
+      // Get folder contents from SharePoint
       $items = $this->getSharePointFolderContents($shareUrl);
 
       if (!$items) {
@@ -346,18 +385,30 @@ class OneDriveService
       // Process items
       foreach ($items as $item) {
          if (isset($item['file']) && preg_match('/\.(fls|FLS)$/i', $item['name'])) {
-            $this->downloadFileFromSharePoint($item, $localPath, $result);
+            if ($this->shouldDownloadFile($item, $existingFiles)) {
+               $this->downloadFileFromSharePoint($item, $localPath, $result);
+            } else {
+               $result['skipped'][] = [
+                  'file' => $item['name'],
+                  'reason' => 'File already exists with same size',
+                  'size' => $item['size'] ?? 0
+               ];
+               Log::info("Skipped {$item['name']} - already exists");
+            }
          } elseif (isset($item['folder'])) {
-            // Handle subfolders if needed
-            $this->processSharePointSubfolder($item, $localPath, $result);
+            $this->processSharePointSubfolder($item, $localPath, $result, $existingFiles);
          }
       }
 
-      $result['success'] = count($result['downloaded']) > 0;
+      $totalProcessed = count($result['downloaded']) + count($result['skipped']);
+      $result['success'] = $totalProcessed > 0;
+
       if ($result['success']) {
-         $result['message'] = count($result['downloaded']) . ' files downloaded successfully';
+         $downloadedCount = count($result['downloaded']);
+         $skippedCount = count($result['skipped']);
+         $result['message'] = "Processed {$totalProcessed} files: {$downloadedCount} downloaded, {$skippedCount} skipped";
       } else {
-         $result['message'] = 'No .fls files found to download';
+         $result['message'] = 'No .fls files found to process';
       }
 
       return $result;
@@ -373,7 +424,6 @@ class OneDriveService
          $downloadUrl = $item['@microsoft.graph.downloadUrl'] ?? null;
 
          if (!$downloadUrl && isset($item['id'])) {
-            // Try to get download URL via Graph API
             $fileEndpoint = "me/drive/items/{$item['id']}/content";
 
             try {
@@ -385,7 +435,6 @@ class OneDriveService
                   'allow_redirects' => false
                ]);
 
-               // Get the redirect location
                $downloadUrl = $response->getHeader('Location')[0] ?? null;
             } catch (\Exception $e) {
                Log::error("Error getting download URL for {$fileName}: " . $e->getMessage());
@@ -416,9 +465,9 @@ class OneDriveService
    }
 
    /**
-    * Process SharePoint subfolders
+    * Process SharePoint subfolders with incremental sync
     */
-   protected function processSharePointSubfolder(array $folder, string $localBasePath, array &$result): void
+   protected function processSharePointSubfolder(array $folder, string $localBasePath, array &$result, array $existingFiles = []): void
    {
       try {
          $folderName = $folder['name'];
@@ -428,7 +477,9 @@ class OneDriveService
             Storage::makeDirectory($folderPath);
          }
 
-         // Get subfolder contents
+         // Get existing files in subfolder
+         $subfolderExistingFiles = $this->getExistingLocalFiles($folderPath);
+
          if (isset($folder['id'])) {
             $subfolderEndpoint = "me/drive/items/{$folder['id']}/children";
             $subItems = $this->makeGraphRequest($subfolderEndpoint);
@@ -436,7 +487,16 @@ class OneDriveService
             if ($subItems && isset($subItems['value'])) {
                foreach ($subItems['value'] as $subItem) {
                   if (isset($subItem['file']) && preg_match('/\.(fls|FLS)$/i', $subItem['name'])) {
-                     $this->downloadFileFromSharePoint($subItem, $folderPath, $result);
+                     if ($this->shouldDownloadFile($subItem, $subfolderExistingFiles)) {
+                        $this->downloadFileFromSharePoint($subItem, $folderPath, $result);
+                     } else {
+                        $result['skipped'][] = [
+                           'file' => $subItem['name'],
+                           'reason' => 'File already exists in subfolder',
+                           'size' => $subItem['size'] ?? 0,
+                           'folder' => $folderName
+                        ];
+                     }
                   }
                }
             }
@@ -447,16 +507,14 @@ class OneDriveService
    }
 
    /**
-    * Get all files from the SharePoint folder
-    */
-   /**
-    * Get all files from the SharePoint folder and organize them into MOD/ORI subfolders
+    * Get all files from the SharePoint folder and organize them into MOD/ORI subfolders with incremental sync
     */
    public function fetchFlashFiles(string $localBasePath = 'flashfiles', array $shareUrls = []): array
    {
       $result = [
          'success' => false,
          'downloaded' => [],
+         'skipped' => [],
          'errors' => [],
          'message' => 'No URLs provided'
       ];
@@ -484,20 +542,27 @@ class OneDriveService
 
       // Process each URL
       foreach ($shareUrls as $index => $url) {
-         // Determine which subfolder to use based on URL index
          $targetSubfolder = ($index === 0) ? $modPath : $oriPath;
+         $folderType = ($index === 0) ? 'MOD' : 'ORI';
+
+         Log::info("Processing {$folderType} folder: {$url}");
 
          $downloadResult = $this->downloadFlashFolders($targetSubfolder, $url);
 
          // Merge results
          $result['downloaded'] = array_merge($result['downloaded'], $downloadResult['downloaded'] ?? []);
+         $result['skipped'] = array_merge($result['skipped'], $downloadResult['skipped'] ?? []);
          $result['errors'] = array_merge($result['errors'], $downloadResult['errors'] ?? []);
       }
 
-      $result['success'] = !empty($result['downloaded']);
+      $totalDownloaded = count($result['downloaded']);
+      $totalSkipped = count($result['skipped']);
+      $totalProcessed = $totalDownloaded + $totalSkipped;
+
+      $result['success'] = $totalProcessed > 0;
       $result['message'] = $result['success']
-         ? count($result['downloaded']) . ' files downloaded successfully'
-         : 'No .fls files found to download';
+         ? "Processed {$totalProcessed} files: {$totalDownloaded} downloaded, {$totalSkipped} skipped"
+         : 'No .fls files found to process';
 
       return $result;
    }
@@ -547,7 +612,6 @@ class OneDriveService
          return ['error' => 'Authentication failed'];
       }
 
-      // Test basic Graph API access
       $userInfo = $this->makeGraphRequest('me');
 
       if ($userInfo) {
@@ -561,53 +625,102 @@ class OneDriveService
       return ['error' => 'Could not access Graph API'];
    }
 
-
-   // More Added
-
    /**
-    * Get folder data by URL (wrapper method for consistency)
+    * Get local file summary for status display
     */
+   public function getLocalFileSummary(string $localBasePath = 'flashfiles'): array
+   {
+      $summary = [
+         'total_files' => 0,
+         'total_size' => 0,
+         'folders' => [],
+         'last_sync' => null
+      ];
+
+      try {
+         if (!Storage::exists($localBasePath)) {
+            return $summary;
+         }
+
+         // Check MOD folder
+         $modPath = $localBasePath . '/MOD';
+         if (Storage::exists($modPath)) {
+            $modFiles = Storage::allFiles($modPath);
+            $modSize = 0;
+            foreach ($modFiles as $file) {
+               $filePath = Storage::path($file);
+               if (file_exists($filePath)) {
+                  $modSize += filesize($filePath);
+               }
+            }
+            $summary['folders']['MOD'] = [
+               'count' => count($modFiles),
+               'size' => $modSize
+            ];
+         }
+
+         // Check ORI folder
+         $oriPath = $localBasePath . '/ORI';
+         if (Storage::exists($oriPath)) {
+            $oriFiles = Storage::allFiles($oriPath);
+            $oriSize = 0;
+            foreach ($oriFiles as $file) {
+               $filePath = Storage::path($file);
+               if (file_exists($filePath)) {
+                  $oriSize += filesize($filePath);
+               }
+            }
+            $summary['folders']['ORI'] = [
+               'count' => count($oriFiles),
+               'size' => $oriSize
+            ];
+         }
+
+         $summary['total_files'] = ($summary['folders']['MOD']['count'] ?? 0) +
+            ($summary['folders']['ORI']['count'] ?? 0);
+         $summary['total_size'] = ($summary['folders']['MOD']['size'] ?? 0) +
+            ($summary['folders']['ORI']['size'] ?? 0);
+
+         // Get last sync time from cache or file timestamp
+         $summary['last_sync'] = Cache::get('onedrive_last_sync');
+      } catch (\Exception $e) {
+         Log::error("Error getting local file summary: " . $e->getMessage());
+      }
+
+      return $summary;
+   }
+
+   // Existing methods remain the same...
    public function getFolderByUrl(string $url): array
    {
-      // Check if it's a SharePoint URL
       if (strpos($url, 'sharepoint.com') !== false) {
          return $this->listSharePointFiles($url);
       }
 
-      // Check if it's a personal OneDrive URL
       if (strpos($url, 'onedrive.live.com') !== false) {
-         // Personal OneDrive URLs need different handling
          return ['error' => 'Personal OneDrive URLs not supported yet'];
       }
 
       return ['error' => 'Unsupported URL format'];
    }
 
-   /**
-    * Download files from specific folders
-    */
    public function downloadSpecificFolders(array $folderNames, string $localBasePath): bool
    {
-      // This is a placeholder implementation
-      // You would need to implement the logic based on your specific requirements
-
-      $sharePointUrl_MOD = 'https://csfsoftware-my.sharepoint.com/:f:/g/personal/daviddieter_csfsoftware_onmicrosoft_com/Em0UIzXicIVKkWAh31GM1BYBfmalbmPCiAzeElLPSI4N2w?e=gj8mbh';
-      $sharePointUrl_ORI = 'https://csfsoftware-my.sharepoint.com/:f:/g/personal/daviddieter_csfsoftware_onmicrosoft_com/ErpheoXGbMhKjIikRAqmzBkB_GPYTuf0FMYwZN4WZUpnFA?e=46HbK6';
+      $sharePointUrl_MOD = env('MOD_FILE_URL');
+      $sharePointUrl_ORI = env('ORI_FILE_URL');
 
       $success = true;
       foreach ($folderNames as $folderName) {
          try {
-            // Here you would implement the logic to download from specific folders
             Log::info("Processing folder: {$folderName}");
 
-            // For now, just use the existing download functionality
             if ($folderName === 'MOD Flash') {
-               $result = $this->fetchFlashFiles($localBasePath . '/' . strtolower(str_replace(' ', '_', $folderName)), $sharePointUrl_MOD);
+               $result = $this->fetchFlashFiles($localBasePath . '/' . strtolower(str_replace(' ', '_', $folderName)), [$sharePointUrl_MOD]);
                if (!$result['success']) {
                   $success = false;
                }
             } else if ($folderName === 'ORIGINAL Flash') {
-               $result = $this->fetchFlashFiles($localBasePath . '/' . strtolower(str_replace(' ', '_', $folderName)), $sharePointUrl_ORI);
+               $result = $this->fetchFlashFiles($localBasePath . '/' . strtolower(str_replace(' ', '_', $folderName)), [$sharePointUrl_ORI]);
                if (!$result['success']) {
                   $success = false;
                }

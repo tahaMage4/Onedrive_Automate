@@ -60,77 +60,50 @@ class OneDriveController extends Controller
       $hasRefreshToken = !empty($refreshToken);
 
       $flashFolderData = [];
+      $localFileSummary = [];
 
       if ($isConnected) {
          // Get data for MOD Flash folder
-         $modFlashUrl = 'https://csfsoftware-my.sharepoint.com/:f:/g/personal/daviddieter_csfsoftware_onmicrosoft_com/Em0UIzXicIVKkWAh31GM1BYBfmalbmPCiAzeElLPSI4N2w?e=gj8mbh';
+         $modFlashUrl = env('MOD_FILE_URL');
          $modFlashData = $this->oneDriveService->listSharePointFiles($modFlashUrl);
 
-         // Note: The ORI Flash URL appears to be a personal OneDrive URL, not SharePoint
-         // You may need to handle this differently or add support for personal OneDrive URLs
-         $oriFlashUrl = 'https://csfsoftware-my.sharepoint.com/:f:/g/personal/daviddieter_csfsoftware_onmicrosoft_com/ErpheoXGbMhKjIikRAqmzBkB_GPYTuf0FMYwZN4WZUpnFA?e=46HbK6';
+         $oriFlashUrl = env('ORI_FILE_URL');
          $oriFlashData = $this->oneDriveService->listSharePointFiles($oriFlashUrl);
 
          $flashFolderData = [
             'MOD Flash' => $modFlashData,
             'ORIGINAL Flash' => $oriFlashData
          ];
+
+         // Get local file summary
+         $localFileSummary = $this->oneDriveService->getLocalFileSummary('flashfiles');
       }
 
       return view('onedrive.status', [
          'isConnected' => $isConnected,
          'hasRefreshToken' => $hasRefreshToken,
          'flashFolderData' => $flashFolderData,
+         'localFileSummary' => $localFileSummary
       ]);
    }
 
    /**
     * Download flash folder files.
     */
-   // public function sync(Request $request)
-   // {
-   //    $option = $request->input('option', 'flashfiles');
-
-   //    try {
-   //       $sharePointUrl_MOD = 'https://csfsoftware-my.sharepoint.com/:f:/g/personal/daviddieter_csfsoftware_onmicrosoft_com/Em0UIzXicIVKkWAh31GM1BYBfmalbmPCiAzeElLPSI4N2w?e=gj8mbh';
-   //       $sharePointUrl_ORI = 'https://csfsoftware-my.sharepoint.com/:f:/g/personal/daviddieter_csfsoftware_onmicrosoft_com/ErpheoXGbMhKjIikRAqmzBkB_GPYTuf0FMYwZN4WZUpnFA?e=46HbK6';
-   //       if ($option === 'flashfiles') {
-   //          $result = $this->oneDriveService->fetchFlashFiles('flashfiles');
-
-   //          if ($result['success']) {
-   //             return redirect()->route('onedrive.status')->with('success', $result['message']);
-   //          } else {
-   //             return redirect()->route('onedrive.status')->with('error', $result['message']);
-   //          }
-   //       } else {
-   //          // For now, just use the existing fetchFlashFiles method
-   //          // You can modify this if you need different behavior
-   //          $result = $this->oneDriveService->fetchFlashFiles('onedrive');
-
-   //          if ($result['success']) {
-   //             return redirect()->route('onedrive.status')->with('success', 'Flash folders synced successfully');
-   //          } else {
-   //             return redirect()->route('onedrive.status')->with('error', 'Failed to sync flash folders');
-   //          }
-   //       }
-   //    } catch (\Exception $e) {
-   //       Log::error('Error during sync: ' . $e->getMessage());
-   //       return redirect()->route('onedrive.status')->with('error', 'Error during sync: ' . $e->getMessage());
-   //    }
-   // }
-
-
    public function sync(Request $request)
    {
       try {
-         $sharePointUrl_MOD = 'https://csfsoftware-my.sharepoint.com/:f:/g/personal/daviddieter_csfsoftware_onmicrosoft_com/Em0UIzXicIVKkWAh31GM1BYBfmalbmPCiAzeElLPSI4N2w?e=gj8mbh';
-         $sharePointUrl_ORI = 'https://csfsoftware-my.sharepoint.com/:f:/g/personal/daviddieter_csfsoftware_onmicrosoft_com/ErpheoXGbMhKjIikRAqmzBkB_GPYTuf0FMYwZN4WZUpnFA?e=46HbK6';
+         $sharePointUrl_MOD = env('MOD_FILE_URL');
+         $sharePointUrl_ORI = env('ORI_FILE_URL');
 
          // Pass URLs in order: MOD first, ORI second
-         $result = $this->oneDriveService->fetchFlashFiles('flashfiles', [
-            $sharePointUrl_MOD,
-            $sharePointUrl_ORI
-         ]);
+         $result = $this->oneDriveService->fetchFlashFiles(
+            $request->input('local_path', 'flashfiles'),
+            [
+               $sharePointUrl_MOD,
+               $sharePointUrl_ORI
+            ]
+         );
 
          if ($result['success']) {
             return redirect()
@@ -158,5 +131,32 @@ class OneDriveController extends Controller
       Cache::forget('onedrive_refresh_token');
 
       return redirect()->route('onedrive.status')->with('success', 'Logged out from OneDrive');
+   }
+
+   /**
+    * Test endpoint for debugging.
+    */
+   public function test()
+   {
+      try {
+         $testResult = $this->oneDriveService->testConnection();
+
+         if (isset($testResult['error'])) {
+            return response()->json([
+               'success' => false,
+               'error' => $testResult['error']
+            ]);
+         }
+
+         return response()->json([
+            'success' => true,
+            'data' => $testResult
+         ]);
+      } catch (\Exception $e) {
+         return response()->json([
+            'success' => false,
+            'error' => $e->getMessage()
+         ], 500);
+      }
    }
 }

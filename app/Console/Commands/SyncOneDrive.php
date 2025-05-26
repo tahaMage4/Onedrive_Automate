@@ -4,15 +4,16 @@ namespace App\Console\Commands;
 
 use Illuminate\Console\Command;
 use App\Services\OneDriveService;
-use Illuminate\Support\Facades\Cache;
-use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\{Cache, Log, Storage};
+
 
 class SyncOneDrive extends Command
 {
    protected $signature = 'onedrive:sync
                             {--flashfiles : Only download .fls files from SharePoint folder}
                             {--list : List files in SharePoint folder without downloading}
-                            {--force-refresh : Force refresh the access token before sync}';
+                            {--force-refresh : Force refresh the access token before sync}
+                            {--local-path=flashfiles : Local storage path relative to storage/app}';
 
    protected $description = 'Sync files from SharePoint OneDrive to local storage';
 
@@ -23,25 +24,24 @@ class SyncOneDrive extends Command
 
    public function handle(): int
    {
-      // Check if user wants to force refresh token
-      // if ($this->option('force-refresh')) {
-      //    $this->info('Force refreshing access token...');
-      //    if (!$this->drive->refreshAccessToken()) {
-      //       $this->error('Failed to refresh access token.');
-      //       return Command::FAILURE;
-      //    }
-      //    $this->info('Access token refreshed successfully.');
-      // }
+      if ($this->option('force-refresh')) {
+         $this->info('Force refreshing access token...');
+         if (!$this->drive->refreshAccessToken()) {
+            $this->error('Failed to refresh access token.');
+            $this->showAuthHelp();
+            return Command::FAILURE;
+         }
+         $this->info('Access token refreshed successfully.');
+      }
 
-      // // Check for valid access token
-      // $token = $this->drive->getValidAccessToken();
+      // Check for valid access token
+      $token = $this->drive->getValidAccessToken();
 
-      // if (!$token) {
-      //    $this->error('No valid access token available.');
-      //    $this->info('Please visit /onedrive/login to authenticate first, or try running with --force-refresh');
-      //    $this->info('You can access the login page by running: php artisan serve');
-      //    return Command::FAILURE;
-      // }
+      if (!$token) {
+         $this->error('No valid access token available.');
+         $this->showAuthHelp();
+         return Command::FAILURE;
+      }
 
       if ($this->option('list')) {
          return $this->listSharePointFiles();
@@ -65,11 +65,11 @@ class SyncOneDrive extends Command
 
       try {
          // Get data for MOD Flash folder
-         $modFlashUrl = 'https://csfsoftware-my.sharepoint.com/:f:/g/personal/daviddieter_csfsoftware_onmicrosoft_com/Em0UIzXicIVKkWAh31GM1BYBfmalbmPCiAzeElLPSI4N2w?e=gj8mbh';
+         $modFlashUrl = env('MOD_FILE_URL');
          $modFlashData = $this->drive->listSharePointFiles($modFlashUrl);
 
          // Get data for ORI Flash folder
-         $oriFlashUrl = 'https://csfsoftware-my.sharepoint.com/:f:/g/personal/daviddieter_csfsoftware_onmicrosoft_com/ErpheoXGbMhKjIikRAqmzBkB_GPYTuf0FMYwZN4WZUpnFA?e=46HbK6';
+         $oriFlashUrl = env('ORI_FILE_URL');
          $oriFlashData = $this->drive->listSharePointFiles($oriFlashUrl);
 
          // Combine both sets of files for processing
@@ -88,6 +88,10 @@ class SyncOneDrive extends Command
             return Command::SUCCESS;
          }
 
+         // Get local file summary for comparison
+         $localPath = $this->option('local-path');
+         $localFiles = $this->drive->getLocalFileSummary($localPath);
+
          $this->info('Files found in SharePoint folders:');
          $this->newLine();
 
@@ -95,9 +99,11 @@ class SyncOneDrive extends Command
          $folderCount = 0;
          $totalSize = 0;
          $flsFiles = [];
+         $existingFiles = [];
 
          foreach ($allFiles as $file) {
             $icon = ($file['type'] ?? 'file') === 'folder' ? '📁' : '📄';
+            $status = '';
 
             if (($file['type'] ?? 'file') === 'folder') {
                $this->line("  {$icon} {$file['name']} (folder - " . ($file['childCount'] ?: 0) . " items)");
@@ -107,7 +113,11 @@ class SyncOneDrive extends Command
                $modified = isset($file['lastModified']) ?
                   date('Y-m-d H:i:s', strtotime($file['lastModified'])) : 'Unknown';
 
-               $this->line("  {$icon} {$file['name']} ({$size}) - Modified: {$modified}");
+               // Check if file exists locally
+               $localExists = $this->checkLocalFileExists($file, $localPath);
+               $status = $localExists ? '✔️ Exists locally' : '❌ Missing locally';
+
+               $this->line("  {$icon} {$file['name']} ({$size}) - Modified: {$modified} - {$status}");
                $fileCount++;
                $totalSize += $file['size'] ?? 0;
 
@@ -131,6 +141,16 @@ class SyncOneDrive extends Command
             }
          }
 
+         // Show local file summary
+         $this->newLine();
+         $this->info('Local file summary:');
+         $this->line("  Path: storage/app/{$localPath}");
+         $this->line("  Total files: {$localFiles['total_files']}");
+         $this->line("  Total size: " . $this->formatFileSize($localFiles['total_size']));
+         if ($localFiles['last_sync']) {
+            $this->line("  Last sync: {$localFiles['last_sync']}");
+         }
+
          return Command::SUCCESS;
       } catch (\Exception $e) {
          $this->error('Error listing SharePoint files: ' . $e->getMessage());
@@ -144,14 +164,15 @@ class SyncOneDrive extends Command
     */
    protected function downloadFlashFiles(): int
    {
-      $this->info("Downloading .fls files from SharePoint folder to 'storage/app/flashfiles'...");
+      $localPath = $this->option('local-path');
+      $this->info("Downloading .fls files from SharePoint folder to 'storage/app/{$localPath}'...");
 
-      $sharePointUrl_MOD = 'https://csfsoftware-my.sharepoint.com/:f:/g/personal/daviddieter_csfsoftware_onmicrosoft_com/Em0UIzXicIVKkWAh31GM1BYBfmalbmPCiAzeElLPSI4N2w?e=gj8mbh';
-      $sharePointUrl_ORI = 'https://csfsoftware-my.sharepoint.com/:f:/g/personal/daviddieter_csfsoftware_onmicrosoft_com/ErpheoXGbMhKjIikRAqmzBkB_GPYTuf0FMYwZN4WZUpnFA?e=46HbK6';
+      $sharePointUrl_MOD = env('MOD_FILE_URL');
+      $sharePointUrl_ORI = env('ORI_FILE_URL');
 
       try {
          // Pass both URLs to the fetchFlashFiles method
-         $result = $this->drive->fetchFlashFiles('flashfiles', [
+         $result = $this->drive->fetchFlashFiles($localPath, [
             $sharePointUrl_MOD,
             $sharePointUrl_ORI
          ]);
@@ -172,6 +193,15 @@ class SyncOneDrive extends Command
 
                $this->newLine();
                $this->info('Total downloaded: ' . count($result['downloaded']) . ' files (' . $this->formatFileSize($totalSize) . ')');
+            }
+
+            if (!empty($result['skipped'])) {
+               $this->newLine();
+               $this->info('Skipped files (already exist with same size):');
+               foreach ($result['skipped'] as $file) {
+                  $size = $this->formatFileSize($file['size']);
+                  $this->line("  ⏭️ {$file['file']} ({$size})");
+               }
             }
 
             if (!empty($result['errors'])) {
@@ -201,6 +231,19 @@ class SyncOneDrive extends Command
          Log::error('SharePoint download error: ' . $e->getMessage(), ['trace' => $e->getTraceAsString()]);
          return Command::FAILURE;
       }
+   }
+
+   /**
+    * Check if a file exists locally
+    */
+   protected function checkLocalFileExists(array $remoteFile, string $localPath): bool
+   {
+      // Determine which subfolder to check based on the URL
+      $subfolder = strpos($remoteFile['name'] ?? '', 'MOD') !== false ? 'MOD' : 'ORI';
+      $fullPath = "{$localPath}/{$subfolder}/{$remoteFile['name']}";
+
+      return Storage::exists($fullPath) &&
+         Storage::size($fullPath) === ($remoteFile['size'] ?? 0);
    }
 
    /**

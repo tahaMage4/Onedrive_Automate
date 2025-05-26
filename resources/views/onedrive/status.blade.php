@@ -58,6 +58,61 @@
         </div>
 
         @if ($isConnected)
+            <!-- Local Files Summary Card -->
+            <div class="card mb-4">
+                <div class="card-header bg-secondary text-white">
+                    <h5 class="mb-0"><i class="fas fa-hdd"></i> Local Files Summary</h5>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="card h-100">
+                                <div class="card-header bg-light">
+                                    <h6 class="mb-0">Storage Path</h6>
+                                </div>
+                                <div class="card-body">
+                                    <p class="mb-0">
+                                        <i class="fas fa-folder-open"></i> storage/app/flashfiles
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="card h-100">
+                                <div class="card-header bg-light">
+                                    <h6 class="mb-0">Summary</h6>
+                                </div>
+                                <div class="card-body">
+                                    <p class="mb-1">
+                                        <i class="fas fa-file"></i> Total Files: {{ $localFileSummary['total_files'] ?? 0 }}
+                                    </p>
+                                    <p class="mb-1">
+                                        <i class="fas fa-database"></i> Total Size:
+                                        @if(isset($localFileSummary['total_size']))
+                                            @if($localFileSummary['total_size'] > 1048576)
+                                                {{ round($localFileSummary['total_size'] / 1048576, 2) }} MB
+                                            @elseif($localFileSummary['total_size'] > 1024)
+                                                {{ round($localFileSummary['total_size'] / 1024, 2) }} KB
+                                            @else
+                                                {{ $localFileSummary['total_size'] }} bytes
+                                            @endif
+                                        @else
+                                            0 bytes
+                                        @endif
+                                    </p>
+                                    @if(isset($localFileSummary['last_sync']))
+                                        <p class="mb-0">
+                                            <i class="fas fa-clock"></i> Last Sync:
+                                            {{ \Carbon\Carbon::parse($localFileSummary['last_sync'])->format('M d, Y H:i') }}
+                                        </p>
+                                    @endif
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <!-- Flash Folders Status Card -->
             <div class="card mb-4">
                 <div class="card-header bg-info text-white">
@@ -122,7 +177,7 @@
                             <div class="col-md-6">
                                 <div class="mb-3">
                                     <label for="local_path" class="form-label">Local Storage Path</label>
-                                    <input type="text" class="form-control" id="local_path" name="local_path" value="onedrive" placeholder="e.g., flashfiles">
+                                    <input type="text" class="form-control" id="local_path" name="local_path" value="flashfiles" placeholder="e.g., flashfiles">
                                     <div class="form-text">Relative to storage/app directory</div>
                                 </div>
                             </div>
@@ -150,17 +205,27 @@
                                     <table class="table table-striped">
                                         <thead>
                                             <tr>
-                                                <th>S.No</th> <!-- Added Serial Number column -->
+                                                <th>S.No</th>
                                                 <th><i class="fas fa-file"></i> Name</th>
                                                 <th><i class="fas fa-tag"></i> Type</th>
                                                 <th><i class="fas fa-weight-hanging"></i> Size</th>
                                                 <th><i class="fas fa-clock"></i> Last Modified</th>
+                                                <th><i class="fas fa-check-circle"></i> Status</th>
                                             </tr>
                                         </thead>
                                         <tbody>
                                             @forelse ($folderData as $index => $file)
+                                                @php
+                                                    // Determine if file exists locally
+                                                    $subfolder = strpos($folderName, 'MOD') !== false ? 'MOD' : 'ORI';
+                                                    $localPath = 'flashfiles/' . $subfolder . '/' . ($file['name'] ?? '');
+                                                    $fileExists = Storage::exists($localPath);
+                                                    $sizeMatches = $fileExists &&
+                                                                  ($file['type'] === 'file') &&
+                                                                  Storage::size($localPath) === ($file['size'] ?? 0);
+                                                @endphp
                                                 <tr>
-                                                    <td>{{ $index + 1 }}</td> <!-- Display serial number -->
+                                                    <td>{{ $index + 1 }}</td>
                                                     <td>
                                                         @if ($file['type'] === 'file')
                                                             <i class="fas fa-file text-primary"></i>
@@ -198,10 +263,23 @@
                                                             -
                                                         @endif
                                                     </td>
+                                                    <td>
+                                                        @if($file['type'] === 'file')
+                                                            @if($fileExists && $sizeMatches)
+                                                                <span class="badge bg-success">Synced</span>
+                                                            @elseif($fileExists)
+                                                                <span class="badge bg-warning">Size mismatch</span>
+                                                            @else
+                                                                <span class="badge bg-danger">Not synced</span>
+                                                            @endif
+                                                        @else
+                                                            <span class="badge bg-info">Folder</span>
+                                                        @endif
+                                                    </td>
                                                 </tr>
                                             @empty
                                                 <tr>
-                                                    <td colspan="5" class="text-center text-muted">
+                                                    <td colspan="6" class="text-center text-muted">
                                                         <i class="fas fa-folder-open"></i> No files found
                                                     </td>
                                                 </tr>
