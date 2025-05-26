@@ -150,6 +150,7 @@
                                     <table class="table table-striped">
                                         <thead>
                                             <tr>
+                                                <th>S.No</th> <!-- Added Serial Number column -->
                                                 <th><i class="fas fa-file"></i> Name</th>
                                                 <th><i class="fas fa-tag"></i> Type</th>
                                                 <th><i class="fas fa-weight-hanging"></i> Size</th>
@@ -157,8 +158,9 @@
                                             </tr>
                                         </thead>
                                         <tbody>
-                                            @forelse ($folderData as $file)
+                                            @forelse ($folderData as $index => $file)
                                                 <tr>
+                                                    <td>{{ $index + 1 }}</td> <!-- Display serial number -->
                                                     <td>
                                                         @if ($file['type'] === 'file')
                                                             <i class="fas fa-file text-primary"></i>
@@ -199,7 +201,7 @@
                                                 </tr>
                                             @empty
                                                 <tr>
-                                                    <td colspan="4" class="text-center text-muted">
+                                                    <td colspan="5" class="text-center text-muted">
                                                         <i class="fas fa-folder-open"></i> No files found
                                                     </td>
                                                 </tr>

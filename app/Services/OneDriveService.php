@@ -314,10 +314,11 @@ class OneDriveService
    /**
     * Download files from SharePoint folder
     */
-   public function downloadFlashFolders(string $localBasePath = 'flashfiles'): array
+   /**
+    * Download files from SharePoint folder to specified local path
+    */
+   public function downloadFlashFolders(string $localPath, string $shareUrl): array
    {
-      $sharePointUrl = 'https://csfsoftware-my.sharepoint.com/:f:/g/personal/daviddieter_csfsoftware_onmicrosoft_com/Em0UIzXicIVKkWAh31GM1BYBfmalbmPCiAzeElLPSI4N2w?e=gj8mbh';
-
       $result = [
          'success' => false,
          'downloaded' => [],
@@ -331,13 +332,8 @@ class OneDriveService
          return $result;
       }
 
-      // Ensure base directory exists
-      if (!Storage::exists($localBasePath)) {
-         Storage::makeDirectory($localBasePath);
-      }
-
       // Get folder contents
-      $items = $this->getSharePointFolderContents($sharePointUrl);
+      $items = $this->getSharePointFolderContents($shareUrl);
 
       if (!$items) {
          $result['errors'][] = 'Could not access SharePoint folder';
@@ -350,10 +346,10 @@ class OneDriveService
       // Process items
       foreach ($items as $item) {
          if (isset($item['file']) && preg_match('/\.(fls|FLS)$/i', $item['name'])) {
-            $this->downloadFileFromSharePoint($item, $localBasePath, $result);
+            $this->downloadFileFromSharePoint($item, $localPath, $result);
          } elseif (isset($item['folder'])) {
             // Handle subfolders if needed
-            $this->processSharePointSubfolder($item, $localBasePath, $result);
+            $this->processSharePointSubfolder($item, $localPath, $result);
          }
       }
 
@@ -453,9 +449,57 @@ class OneDriveService
    /**
     * Get all files from the SharePoint folder
     */
-   public function fetchFlashFiles(string $localBasePath = 'flashfiles'): array
+   /**
+    * Get all files from the SharePoint folder and organize them into MOD/ORI subfolders
+    */
+   public function fetchFlashFiles(string $localBasePath = 'flashfiles', array $shareUrls = []): array
    {
-      return $this->downloadFlashFolders($localBasePath);
+      $result = [
+         'success' => false,
+         'downloaded' => [],
+         'errors' => [],
+         'message' => 'No URLs provided'
+      ];
+
+      if (empty($shareUrls)) {
+         return $result;
+      }
+
+      // Ensure base directory exists
+      if (!Storage::exists($localBasePath)) {
+         Storage::makeDirectory($localBasePath);
+      }
+
+      // Create MOD and ORI subdirectories if they don't exist
+      $modPath = $localBasePath . '/MOD';
+      $oriPath = $localBasePath . '/ORI';
+
+      if (!Storage::exists($modPath)) {
+         Storage::makeDirectory($modPath);
+      }
+
+      if (!Storage::exists($oriPath)) {
+         Storage::makeDirectory($oriPath);
+      }
+
+      // Process each URL
+      foreach ($shareUrls as $index => $url) {
+         // Determine which subfolder to use based on URL index
+         $targetSubfolder = ($index === 0) ? $modPath : $oriPath;
+
+         $downloadResult = $this->downloadFlashFolders($targetSubfolder, $url);
+
+         // Merge results
+         $result['downloaded'] = array_merge($result['downloaded'], $downloadResult['downloaded'] ?? []);
+         $result['errors'] = array_merge($result['errors'], $downloadResult['errors'] ?? []);
+      }
+
+      $result['success'] = !empty($result['downloaded']);
+      $result['message'] = $result['success']
+         ? count($result['downloaded']) . ' files downloaded successfully'
+         : 'No .fls files found to download';
+
+      return $result;
    }
 
    /**
@@ -547,6 +591,9 @@ class OneDriveService
       // This is a placeholder implementation
       // You would need to implement the logic based on your specific requirements
 
+      $sharePointUrl_MOD = 'https://csfsoftware-my.sharepoint.com/:f:/g/personal/daviddieter_csfsoftware_onmicrosoft_com/Em0UIzXicIVKkWAh31GM1BYBfmalbmPCiAzeElLPSI4N2w?e=gj8mbh';
+      $sharePointUrl_ORI = 'https://csfsoftware-my.sharepoint.com/:f:/g/personal/daviddieter_csfsoftware_onmicrosoft_com/ErpheoXGbMhKjIikRAqmzBkB_GPYTuf0FMYwZN4WZUpnFA?e=46HbK6';
+
       $success = true;
       foreach ($folderNames as $folderName) {
          try {
@@ -555,7 +602,12 @@ class OneDriveService
 
             // For now, just use the existing download functionality
             if ($folderName === 'MOD Flash') {
-               $result = $this->fetchFlashFiles($localBasePath . '/' . strtolower(str_replace(' ', '_', $folderName)));
+               $result = $this->fetchFlashFiles($localBasePath . '/' . strtolower(str_replace(' ', '_', $folderName)), $sharePointUrl_MOD);
+               if (!$result['success']) {
+                  $success = false;
+               }
+            } else if ($folderName === 'ORIGINAL Flash') {
+               $result = $this->fetchFlashFiles($localBasePath . '/' . strtolower(str_replace(' ', '_', $folderName)), $sharePointUrl_ORI);
                if (!$result['success']) {
                   $success = false;
                }

@@ -61,44 +61,60 @@ class SyncOneDrive extends Command
     */
    protected function listSharePointFiles(): int
    {
-      $this->info('Listing files in SharePoint folder...');
-
-      $sharePointUrl = 'https://csfsoftware-my.sharepoint.com/:f:/g/personal/daviddieter_csfsoftware_onmicrosoft_com/Em0UIzXicIVKkWAh31GM1BYBfmalbmPCiAzeElLPSI4N2w?e=gj8mbh';
+      $this->info('Listing files in SharePoint folders...');
 
       try {
-         $files = $this->drive->listSharePointFiles($sharePointUrl);
+         // Get data for MOD Flash folder
+         $modFlashUrl = 'https://csfsoftware-my.sharepoint.com/:f:/g/personal/daviddieter_csfsoftware_onmicrosoft_com/Em0UIzXicIVKkWAh31GM1BYBfmalbmPCiAzeElLPSI4N2w?e=gj8mbh';
+         $modFlashData = $this->drive->listSharePointFiles($modFlashUrl);
 
-         if (isset($files['error'])) {
-            $this->error('Error: ' . $files['error']);
+         // Get data for ORI Flash folder
+         $oriFlashUrl = 'https://csfsoftware-my.sharepoint.com/:f:/g/personal/daviddieter_csfsoftware_onmicrosoft_com/ErpheoXGbMhKjIikRAqmzBkB_GPYTuf0FMYwZN4WZUpnFA?e=46HbK6';
+         $oriFlashData = $this->drive->listSharePointFiles($oriFlashUrl);
+
+         // Combine both sets of files for processing
+         $allFiles = array_merge(
+            $modFlashData['value'] ?? $modFlashData,
+            $oriFlashData['value'] ?? $oriFlashData
+         );
+
+         if (isset($allFiles['error'])) {
+            $this->error('Error: ' . $allFiles['error']);
             return Command::FAILURE;
          }
 
-         if (empty($files)) {
-            $this->info('No files found in the SharePoint folder.');
+         if (empty($allFiles)) {
+            $this->info('No files found in the SharePoint folders.');
             return Command::SUCCESS;
          }
 
-         $this->info('Files found in SharePoint folder:');
+         $this->info('Files found in SharePoint folders:');
          $this->newLine();
 
          $fileCount = 0;
          $folderCount = 0;
          $totalSize = 0;
+         $flsFiles = [];
 
-         foreach ($files as $file) {
-            $icon = $file['type'] === 'folder' ? '📁' : '📄';
+         foreach ($allFiles as $file) {
+            $icon = ($file['type'] ?? 'file') === 'folder' ? '📁' : '📄';
 
-            if ($file['type'] === 'folder') {
-               $this->line("  {$icon} {$file['name']} (folder - {$file['childCount']} items)");
+            if (($file['type'] ?? 'file') === 'folder') {
+               $this->line("  {$icon} {$file['name']} (folder - " . ($file['childCount'] ?: 0) . " items)");
                $folderCount++;
             } else {
-               $size = $this->formatFileSize($file['size']);
+               $size = $this->formatFileSize($file['size'] ?? 0);
                $modified = isset($file['lastModified']) ?
                   date('Y-m-d H:i:s', strtotime($file['lastModified'])) : 'Unknown';
 
                $this->line("  {$icon} {$file['name']} ({$size}) - Modified: {$modified}");
                $fileCount++;
-               $totalSize += $file['size'];
+               $totalSize += $file['size'] ?? 0;
+
+               // Track .fls files
+               if (preg_match('/\.fls$/i', $file['name'] ?? '')) {
+                  $flsFiles[] = $file;
+               }
             }
          }
 
@@ -106,16 +122,11 @@ class SyncOneDrive extends Command
          $this->info("Summary: {$fileCount} files, {$folderCount} folders");
          $this->info("Total size: " . $this->formatFileSize($totalSize));
 
-         // Show .fls files specifically
-         $flsFiles = array_filter($files, function ($file) {
-            return $file['type'] === 'file' && preg_match('/\.(fls|FLS)$/i', $file['name']);
-         });
-
          if (!empty($flsFiles)) {
             $this->newLine();
             $this->info('.fls files found:');
             foreach ($flsFiles as $file) {
-               $size = $this->formatFileSize($file['size']);
+               $size = $this->formatFileSize($file['size'] ?? 0);
                $this->line("  🔧 {$file['name']} ({$size})");
             }
          }
@@ -135,8 +146,15 @@ class SyncOneDrive extends Command
    {
       $this->info("Downloading .fls files from SharePoint folder to 'storage/app/flashfiles'...");
 
+      $sharePointUrl_MOD = 'https://csfsoftware-my.sharepoint.com/:f:/g/personal/daviddieter_csfsoftware_onmicrosoft_com/Em0UIzXicIVKkWAh31GM1BYBfmalbmPCiAzeElLPSI4N2w?e=gj8mbh';
+      $sharePointUrl_ORI = 'https://csfsoftware-my.sharepoint.com/:f:/g/personal/daviddieter_csfsoftware_onmicrosoft_com/ErpheoXGbMhKjIikRAqmzBkB_GPYTuf0FMYwZN4WZUpnFA?e=46HbK6';
+
       try {
-         $result = $this->drive->fetchFlashFiles('flashfiles');
+         // Pass both URLs to the fetchFlashFiles method
+         $result = $this->drive->fetchFlashFiles('flashfiles', [
+            $sharePointUrl_MOD,
+            $sharePointUrl_ORI
+         ]);
 
          if ($result['success']) {
             $this->info('✅ ' . $result['message']);
