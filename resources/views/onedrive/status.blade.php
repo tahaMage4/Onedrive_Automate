@@ -6,6 +6,38 @@
     <title>OneDrive Connection Status</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        .progress-container {
+            margin-top: 20px;
+            display: none;
+        }
+        .file-processing-log {
+            max-height: 300px;
+            overflow-y: auto;
+            background-color: #f8f9fa;
+            padding: 15px;
+            border-radius: 5px;
+            margin-top: 15px;
+            font-family: monospace;
+        }
+        .log-entry {
+            margin-bottom: 5px;
+            padding-bottom: 5px;
+            border-bottom: 1px solid #eee;
+        }
+        .log-success {
+            color: #28a745;
+        }
+        .log-error {
+            color: #dc3545;
+        }
+        .log-warning {
+            color: #ffc107;
+        }
+        .log-info {
+            color: #17a2b8;
+        }
+    </style>
 </head>
 <body>
     <div class="container mt-5">
@@ -190,6 +222,39 @@
                 </div>
             </div>
 
+            <!-- Process Flash Files Card -->
+            <div class="card mb-4">
+                <div class="card-header bg-warning text-white">
+                    <h5 class="mb-0"><i class="fas fa-cogs"></i> Process Flash Files</h5>
+                </div>
+                <div class="card-body">
+                    <div class="alert alert-info">
+                        <i class="fas fa-info-circle"></i> This will process downloaded flash files into products in your database.
+                    </div>
+
+                    <form id="processForm" action="{{ route('onedrive.process-flash') }}" method="POST">
+                        @csrf
+                        <div class="mb-3">
+                            <label for="process_path" class="form-label">Local Path to Process</label>
+                            <input type="text" class="form-control" id="process_path" name="local_path" value="flashfiles" placeholder="e.g., flashfiles">
+                            <div class="form-text">Relative to storage/app directory</div>
+                        </div>
+
+                        <button type="submit" class="btn btn-warning btn-lg" id="processButton">
+                            <i class="fas fa-cog"></i> Process Flash Files
+                        </button>
+                    </form>
+
+                    <div id="progressContainer" class="progress-container">
+                        <div class="progress mb-3">
+                            <div id="progressBar" class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 0%"></div>
+                        </div>
+                        <div id="progressText" class="text-center mb-3">Preparing to process files...</div>
+                        <div id="fileProcessingLog" class="file-processing-log"></div>
+                    </div>
+                </div>
+            </div>
+
             <!-- Flash Folder Contents -->
             @if (!empty($flashFolderData))
                 @foreach ($flashFolderData as $folderName => $folderData)
@@ -321,5 +386,87 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const processForm = document.getElementById('processForm');
+            const progressContainer = document.getElementById('progressContainer');
+            const progressBar = document.getElementById('progressBar');
+            const progressText = document.getElementById('progressText');
+            const fileProcessingLog = document.getElementById('fileProcessingLog');
+            const processButton = document.getElementById('processButton');
+
+            if (processForm) {
+                processForm.addEventListener('submit', function(e) {
+                    e.preventDefault();
+
+                    // Show progress container
+                    progressContainer.style.display = 'block';
+                    processButton.disabled = true;
+                    processButton.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Processing...';
+
+                    // Create an EventSource connection to listen for progress updates
+                    const eventSource = new EventSource("{{ route('onedrive.process-flash') }}?local_path=" +
+                        encodeURIComponent(document.getElementById('process_path').value));
+
+                    eventSource.onmessage = function(event) {
+                        const data = JSON.parse(event.data);
+
+                        if (data.progress) {
+                            progressBar.style.width = data.progress + '%';
+                            progressText.textContent = data.message;
+
+                            // Add log entry
+                            const logEntry = document.createElement('div');
+                            logEntry.className = 'log-entry';
+
+                            if (data.type === 'success') {
+                                logEntry.classList.add('log-success');
+                                logEntry.innerHTML = '<i class="fas fa-check-circle"></i> ' + data.message;
+                            } else if (data.type === 'error') {
+                                logEntry.classList.add('log-error');
+                                logEntry.innerHTML = '<i class="fas fa-exclamation-circle"></i> ' + data.message;
+                            } else if (data.type === 'warning') {
+                                logEntry.classList.add('log-warning');
+                                logEntry.innerHTML = '<i class="fas fa-exclamation-triangle"></i> ' + data.message;
+                            } else {
+                                logEntry.classList.add('log-info');
+                                logEntry.innerHTML = '<i class="fas fa-info-circle"></i> ' + data.message;
+                            }
+
+                            fileProcessingLog.appendChild(logEntry);
+                            fileProcessingLog.scrollTop = fileProcessingLog.scrollHeight;
+                        }
+
+                        if (data.complete) {
+                            progressBar.style.width = '100%';
+                            progressText.textContent = data.message;
+                            eventSource.close();
+                            processButton.disabled = false;
+                            processButton.innerHTML = '<i class="fas fa-cog"></i> Process Complete';
+
+                            // Show completion message
+                            const logEntry = document.createElement('div');
+                            logEntry.className = 'log-entry log-success';
+                            logEntry.innerHTML = '<i class="fas fa-check-circle"></i> Processing complete!';
+                            fileProcessingLog.appendChild(logEntry);
+                            fileProcessingLog.scrollTop = fileProcessingLog.scrollHeight;
+
+                            // Reload the page after 3 seconds to show updated status
+                            setTimeout(function() {
+                                window.location.reload();
+                            }, 3000);
+                        }
+                    };
+
+                    eventSource.onerror = function() {
+                        progressText.textContent = 'Connection error occurred';
+                        processButton.disabled = false;
+                        processButton.innerHTML = '<i class="fas fa-cog"></i> Try Again';
+                        eventSource.close();
+                    };
+                });
+            }
+        });
+    </script>
 </body>
 </html>

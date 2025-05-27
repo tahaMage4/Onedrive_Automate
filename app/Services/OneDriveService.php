@@ -2,6 +2,8 @@
 
 namespace App\Services;
 
+use App\Models\Category;
+use App\Models\Product;
 use Microsoft\Graph\GraphServiceClient;
 use Microsoft\Kiota\Authentication\Oauth\ClientCredentialContext;
 use Microsoft\Graph\Generated\Models\DriveItem;
@@ -9,6 +11,7 @@ use GuzzleHttp\Client;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 
 class OneDriveService
 {
@@ -64,20 +67,28 @@ class OneDriveService
    public function getAccessToken(string $authCode): array
    {
       $client = new Client();
-      $response = $client->post("https://login.microsoftonline.com/{$this->tenantId}/oauth2/v2.0/token", [
-         'form_params' => [
-            'client_id' => $this->clientId,
-            'client_secret' => $this->clientSecret,
-            'grant_type' => 'client_credentials',
-            'redirect_uri' => $this->redirectUri,
-            'scope' => 'offline_access https://graph.microsoft.com/Sites.Read.All https://graph.microsoft.com/Files.Read.All https://graph.microsoft.com/User.Read',
-         ],
-      ]);
+      try {
+         $response = $client->post("https://login.microsoftonline.com/{$this->tenantId}/oauth2/v2.0/token", [
+            'form_params' => [
+               'client_id' => $this->clientId,
+               'client_secret' => $this->clientSecret,
+               'code' => $authCode,
+               'grant_type' => 'client_credentials', // authorization_code
+               'redirect_uri' => $this->redirectUri,
+               'scope' => 'offline_access https://graph.microsoft.com/Sites.Read.All https://graph.microsoft.com/Files.Read.All https://graph.microsoft.com/User.Read',
+            ],
+         ]);
 
-      $tokenData = json_decode((string) $response->getBody(), true);
-      $this->cacheTokenData($tokenData);
+         $tokenData = json_decode((string) $response->getBody(), true);
+         $this->cacheTokenData($tokenData);
 
-      return $tokenData;
+         return $tokenData;
+      } catch (\GuzzleHttp\Exception\ClientException $e) {
+         $response = $e->getResponse();
+         $responseBody = $response->getBody()->getContents();
+         Log::error('Token request failed: ' . $responseBody);
+         throw new \Exception('Failed to get access token: ' . $responseBody);
+      }
    }
 
    /**
@@ -732,5 +743,170 @@ class OneDriveService
       }
 
       return $success;
+   }
+
+   // Product Create
+
+   /**
+    * Process files from the flashfiles folder with category and product management
+    */
+   public function processFlashFiles(string $localBasePath = 'flashfiles'): array
+   {
+      $result = [
+         'success' => false,
+         'created_categories' => 0,
+         'created_products' => 0,
+         'updated_products' => 0,
+         'skipped_products' => 0,
+         'errors' => [],
+      ];
+
+      try {
+         if (!Storage::exists($localBasePath)) {
+            $result['errors'][] = "Base directory {$localBasePath} does not exist";
+            return $result;
+         }
+
+         // Get all subdirectories in flashfiles
+         $subdirectories = Storage::directories($localBasePath);
+
+         foreach ($subdirectories as $subdirectory) {
+            $folderName = basename($subdirectory);
+
+            // Get or create category
+            $category = $this->getOrCreateFlashCategory($folderName);
+            if (!$category) {
+               $result['errors'][] = "Failed to create category for {$folderName}";
+               continue;
+            }
+
+            // Process files in the subdirectory
+            $files = Storage::allFiles($subdirectory);
+
+            foreach ($files as $file) {
+               $this->processFlashFile($file, $category, $result);
+            }
+         }
+
+         $result['success'] = true;
+         return $result;
+      } catch (\Exception $e) {
+         Log::error("Error processing flash files: " . $e->getMessage());
+         $result['errors'][] = "System error: " . $e->getMessage();
+         return $result;
+      }
+   }
+
+   /**
+    * Get or create a category for flash files
+    */
+   protected function getOrCreateFlashCategory(string $folderName): ?Category
+   {
+      $slug = Str::slug($folderName);
+
+      return Category::firstOrCreate(
+         ['slug' => $slug],
+         [
+            'name' => $folderName,
+            'slug' => $slug,
+            'icon' => '',
+            'status' => 1,
+            'is_featured' => 0,
+            'is_top' => 0,
+            'is_popular' => 0,
+            'is_trending' => 0,
+            'price' => 30, // Default price
+            'thumb_image' => '',
+         ]
+      );
+   }
+
+   /**
+    * Process an individual flash file
+    */
+   protected function processFlashFile(string $filePath, Category $category, array &$result): void
+   {
+      try {
+         $fileName = basename($filePath);
+         $fileId = md5($filePath); // Using file path hash as ID since we don't have OneDrive ID here
+         $productName = pathinfo($fileName, PATHINFO_FILENAME);
+         $fileSize = Storage::size($filePath);
+         $lastModified = Storage::lastModified($filePath);
+
+         // Check if product already exists
+         $existingProduct = Product::where('onedrive_id', $fileId)
+            ->orWhere('name', $productName)
+            ->first();
+
+         if ($existingProduct) {
+            // Update existing product if file has changed
+            if ($existingProduct->updated_at->timestamp < $lastModified) {
+               $existingProduct->update([
+                  'price' => $category->price,
+                  'category_id' => $category->id,
+                  'download_file' => $filePath,
+                  'last_synced_at' => now(),
+                  'updated_at' => now(),
+               ]);
+               $result['updated_products']++;
+            } else {
+               $result['skipped_products']++;
+            }
+            return;
+         }
+
+         // Create new product
+         Product::create([
+            'onedrive_id' => $fileId,
+            'name' => $productName,
+            'short_name' => Str::limit($productName, 20),
+            'slug' => Str::slug($productName),
+            'category_id' => $category->id,
+            'sub_category_id' => 0,
+            'child_category_id' => 0,
+            'brand_id' => $category->brand_id ?? 1,
+            'price' => $category->price ?? 0,
+            'qty' => 10000,
+            'short_description' => "Flash file {$productName}",
+            'long_description' => "Flash file {$productName} from {$category->name} category",
+            'download_file' => $filePath,
+            'thumb_image' => $category->thumb_image ?? null,
+            'banner_image' => null,
+            'vendor_id' => 0,
+            'video_link' => null,
+            'sku' => null,
+            'seo_title' => $productName,
+            'seo_description' => "Download {$productName} flash file",
+            'offer_price' => null,
+            'offer_start_date' => null,
+            'offer_end_date' => null,
+            'tax_id' => 1,
+            'is_cash_delivery' => 0,
+            'is_return' => 0,
+            'return_policy_id' => null,
+            'tags' => null,
+            'is_warranty' => 0,
+            'show_homepage' => 0,
+            'is_undefine' => 1,
+            'is_featured' => 0,
+            'serial' => null,
+            'is_wholesale' => 0,
+            'new_product' => 0,
+            'is_top' => 0,
+            'is_best' => 0,
+            'is_flash_deal' => 0,
+            'flash_deal_date' => null,
+            'buyone_getone' => 0,
+            'status' => 1,
+            'last_synced_at' => now(),
+            'is_specification' => 1,
+         ]);
+
+
+         $result['created_products']++;
+      } catch (\Exception $e) {
+         Log::error("Error processing flash file {$filePath}: " . $e->getMessage());
+         $result['errors'][] = "Error processing {$filePath}: " . $e->getMessage();
+      }
    }
 }

@@ -13,7 +13,8 @@ class SyncOneDrive extends Command
                             {--flashfiles : Only download .fls files from SharePoint folder}
                             {--list : List files in SharePoint folder without downloading}
                             {--force-refresh : Force refresh the access token before sync}
-                            {--local-path=flashfiles : Local storage path relative to storage/app}';
+                            {--local-path=flashfiles : Local storage path relative to storage/app}
+                            {--process : Process downloaded flash files into products}';
 
    protected $description = 'Sync files from SharePoint OneDrive to local storage';
 
@@ -47,11 +48,14 @@ class SyncOneDrive extends Command
          return $this->listSharePointFiles();
       } elseif ($this->option('flashfiles')) {
          return $this->downloadFlashFiles();
+      } elseif ($this->option('process')) {
+         return $this->processFlashFiles();
       } else {
          $this->error('Please specify an option:');
          $this->line('  --flashfiles  Download .fls files from SharePoint folder');
          $this->line('  --list        List files in SharePoint folder');
          $this->line('  --force-refresh Force refresh access token');
+         $this->line('  --process     Process downloaded flash files into products');
          return Command::FAILURE;
       }
    }
@@ -279,5 +283,52 @@ class SyncOneDrive extends Command
       $this->line('4. Run this command again');
       $this->newLine();
       $this->line('Or try: php artisan onedrive:sync --force-refresh');
+   }
+
+
+   // Add this new method to handle the processing (Product Processin)
+   protected function processFlashFiles(): int
+   {
+      $this->info('Processing flash files into products...');
+
+      try {
+         $result = $this->drive->processFlashFiles($this->option('local-path'));
+
+         if ($result['success']) {
+            $this->info(sprintf(
+               "✅ Successfully processed flash files: %d categories, %d products created, %d updated, %d skipped",
+               $result['created_categories'],
+               $result['created_products'],
+               $result['updated_products'],
+               $result['skipped_products']
+            ));
+
+            if (!empty($result['errors'])) {
+               $this->newLine();
+               $this->warn('⚠️  Some files had processing errors:');
+               foreach ($result['errors'] as $error) {
+                  $this->warn("  • {$error}");
+               }
+            }
+
+            return Command::SUCCESS;
+         } else {
+            $this->error('❌ Failed to process flash files');
+
+            if (!empty($result['errors'])) {
+               $this->newLine();
+               $this->error('Errors encountered:');
+               foreach ($result['errors'] as $error) {
+                  $this->error("  • {$error}");
+               }
+            }
+
+            return Command::FAILURE;
+         }
+      } catch (\Exception $e) {
+         $this->error('❌ Error processing flash files: ' . $e->getMessage());
+         Log::error('Flash files processing error: ' . $e->getMessage(), ['trace' => $e->getTraceAsString()]);
+         return Command::FAILURE;
+      }
    }
 }

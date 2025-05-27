@@ -159,4 +159,41 @@ class OneDriveController extends Controller
          ], 500);
       }
    }
+
+   // Add this new method to your OneDriveController
+   public function processFlashProducts(Request $request)
+   {
+      dd($request->all());
+      try {
+         $result = $this->oneDriveService->processFlashFiles($this->option('local-path'));
+
+         if ($result['success']) {
+            $message = sprintf(
+               "Processed flash files: %d categories, %d products created, %d updated, %d skipped",
+               $result['created_categories'],
+               $result['created_products'],
+               $result['updated_products'],
+               $result['skipped_products']
+            );
+
+            if (!empty($result['errors'])) {
+               $message .= " (with " . count($result['errors']) . " errors)";
+               Log::error('Flash files processing errors', $result['errors']);
+            }
+
+            return redirect()
+               ->route('onedrive.status')
+               ->with('success', $message);
+         } else {
+            return redirect()
+               ->route('onedrive.status')
+               ->with('error', 'Failed to process flash files: ' . implode(', ', $result['errors']));
+         }
+      } catch (\Exception $e) {
+         Log::error("Flash files processing failed: " . $e->getMessage());
+         return redirect()
+            ->route('onedrive.status')
+            ->with('error', 'Flash files processing failed: ' . $e->getMessage());
+      }
+   }
 }

@@ -54,5 +54,7 @@ Route::get('/onedrive/callback', [OneDriveController::class, 'callback'])->name(
 Route::get('/onedrive/status', [OneDriveController::class, 'status'])->name('onedrive.status');
 Route::post('/onedrive/sync', [OneDriveController::class, 'sync'])->name('onedrive.sync');
 Route::post('/onedrive/logout', [OneDriveController::class, 'logout'])->name('onedrive.logout');
+Route::post('/onedrive/process-flash', [OneDriveController::class, 'processFlashProducts'])
+    ->name('onedrive.process-flash');
 
 Route::get('/test', [OneDriveController::class, 'test'])->name('test');
