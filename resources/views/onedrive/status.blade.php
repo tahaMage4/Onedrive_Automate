@@ -7,10 +7,6 @@
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <style>
-        .progress-container {
-            margin-top: 20px;
-            display: none;
-        }
         .file-processing-log {
             max-height: 300px;
             overflow-y: auto;
@@ -25,17 +21,29 @@
             padding-bottom: 5px;
             border-bottom: 1px solid #eee;
         }
-        .log-success {
-            color: #28a745;
+        .log-success { color: #28a745; }
+        .log-error { color: #dc3545; }
+        .log-warning { color: #ffc107; }
+        .log-info { color: #17a2b8; }
+
+        .tab-content {
+            border: 1px solid #dee2e6;
+            border-top: none;
+            border-radius: 0 0 0.375rem 0.375rem;
+            padding: 1rem;
         }
-        .log-error {
-            color: #dc3545;
+
+        .pagination-controls {
+            display: flex;
+            justify-content: between;
+            align-items: center;
+            margin-bottom: 1rem;
         }
-        .log-warning {
-            color: #ffc107;
-        }
-        .log-info {
-            color: #17a2b8;
+
+        .entries-per-page {
+            display: flex;
+            align-items: center;
+            gap: 10px;
         }
     </style>
 </head>
@@ -232,7 +240,7 @@
                         <i class="fas fa-info-circle"></i> This will process downloaded flash files into products in your database.
                     </div>
 
-                    <form id="processForm" action="{{ route('onedrive.process-flash') }}" method="POST">
+                    <form action="{{ route('onedrive.process-flash') }}" method="POST">
                         @csrf
                         <div class="mb-3">
                             <label for="process_path" class="form-label">Local Path to Process</label>
@@ -240,122 +248,194 @@
                             <div class="form-text">Relative to storage/app directory</div>
                         </div>
 
-                        <button type="submit" class="btn btn-warning btn-lg" id="processButton">
+                        <button type="submit" class="btn btn-warning btn-lg">
                             <i class="fas fa-cog"></i> Process Flash Files
                         </button>
                     </form>
-
-                    <div id="progressContainer" class="progress-container">
-                        <div class="progress mb-3">
-                            <div id="progressBar" class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 0%"></div>
-                        </div>
-                        <div id="progressText" class="text-center mb-3">Preparing to process files...</div>
-                        <div id="fileProcessingLog" class="file-processing-log"></div>
-                    </div>
                 </div>
             </div>
 
-            <!-- Flash Folder Contents -->
+            <!-- Flash Folder Contents with Tabs -->
             @if (!empty($flashFolderData))
-                @foreach ($flashFolderData as $folderName => $folderData)
-                    @if (!isset($folderData['error']) && !empty($folderData))
-                        <div class="card mb-4">
-                            <div class="card-header bg-secondary text-white">
-                                <h5 class="mb-0">
-                                    <i class="fas fa-folder-open"></i> {{ $folderName }} Contents
-                                </h5>
-                            </div>
-                            <div class="card-body">
-                                <div class="table-responsive">
-                                    <table class="table table-striped">
-                                        <thead>
-                                            <tr>
-                                                <th>S.No</th>
-                                                <th><i class="fas fa-file"></i> Name</th>
-                                                <th><i class="fas fa-tag"></i> Type</th>
-                                                <th><i class="fas fa-weight-hanging"></i> Size</th>
-                                                <th><i class="fas fa-clock"></i> Last Modified</th>
-                                                <th><i class="fas fa-check-circle"></i> Status</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            @forelse ($folderData as $index => $file)
-                                                @php
-                                                    // Determine if file exists locally
-                                                    $subfolder = strpos($folderName, 'MOD') !== false ? 'MOD' : 'ORI';
-                                                    $localPath = 'flashfiles/' . $subfolder . '/' . ($file['name'] ?? '');
-                                                    $fileExists = Storage::exists($localPath);
-                                                    $sizeMatches = $fileExists &&
-                                                                  ($file['type'] === 'file') &&
-                                                                  Storage::size($localPath) === ($file['size'] ?? 0);
-                                                @endphp
-                                                <tr>
-                                                    <td>{{ $index + 1 }}</td>
-                                                    <td>
-                                                        @if ($file['type'] === 'file')
-                                                            <i class="fas fa-file text-primary"></i>
-                                                        @else
-                                                            <i class="fas fa-folder text-warning"></i>
-                                                        @endif
-                                                        {{ $file['name'] }}
-                                                    </td>
-                                                    <td>
-                                                        @if ($file['type'] === 'file')
-                                                            <span class="badge bg-primary">File</span>
-                                                        @else
-                                                            <span class="badge bg-warning">Folder</span>
-                                                        @endif
-                                                    </td>
-                                                    <td>
-                                                        @if ($file['type'] === 'file' && isset($file['size']))
-                                                            @if ($file['size'] > 1048576)
-                                                                {{ round($file['size'] / 1048576, 2) }} MB
-                                                            @elseif ($file['size'] > 1024)
-                                                                {{ round($file['size'] / 1024, 2) }} KB
-                                                            @else
-                                                                {{ $file['size'] }} bytes
-                                                            @endif
-                                                        @elseif ($file['type'] === 'folder' && isset($file['childCount']))
-                                                            {{ $file['childCount'] }} items
-                                                        @else
-                                                            -
-                                                        @endif
-                                                    </td>
-                                                    <td>
-                                                        @if (isset($file['lastModified']))
-                                                            {{ \Carbon\Carbon::parse($file['lastModified'])->format('M d, Y H:i') }}
-                                                        @else
-                                                            -
-                                                        @endif
-                                                    </td>
-                                                    <td>
-                                                        @if($file['type'] === 'file')
-                                                            @if($fileExists && $sizeMatches)
-                                                                <span class="badge bg-success">Synced</span>
-                                                            @elseif($fileExists)
-                                                                <span class="badge bg-warning">Size mismatch</span>
-                                                            @else
-                                                                <span class="badge bg-danger">Not synced</span>
-                                                            @endif
-                                                        @else
-                                                            <span class="badge bg-info">Folder</span>
-                                                        @endif
-                                                    </td>
-                                                </tr>
-                                            @empty
-                                                <tr>
-                                                    <td colspan="6" class="text-center text-muted">
-                                                        <i class="fas fa-folder-open"></i> No files found
-                                                    </td>
-                                                </tr>
-                                            @endforelse
-                                        </tbody>
-                                    </table>
-                                </div>
-                            </div>
+                <div class="card mb-4">
+                    <div class="card-header bg-secondary text-white">
+                        <h5 class="mb-0">
+                            <i class="fas fa-folder-open"></i> Flash Folder Contents
+                        </h5>
+                    </div>
+                    <div class="card-body p-0">
+                        <!-- Tabs Navigation -->
+                        <ul class="nav nav-tabs" id="flashFolderTabs" role="tablist">
+                            @php $isFirst = true; @endphp
+                            @foreach ($flashFolderData as $folderName => $folderData)
+                                @if (!isset($folderData['error']) && !empty($folderData))
+                                    @php
+                                        $tabId = 'tab-' . md5($folderName);
+                                        $contentId = 'content-' . md5($folderName);
+                                        $displayName = (strpos($folderName, 'MOD') !== false) ? 'MOD' : 'ORIGINAL';
+                                    @endphp
+                                    <li class="nav-item" role="presentation">
+                                        <button class="nav-link {{ $isFirst ? 'active' : '' }}"
+                                                id="{{ $tabId }}"
+                                                data-bs-toggle="tab"
+                                                data-bs-target="#{{ $contentId }}"
+                                                type="button"
+                                                role="tab"
+                                                aria-controls="{{ $contentId }}"
+                                                aria-selected="{{ $isFirst ? 'true' : 'false' }}">
+                                            <i class="fas fa-folder"></i> {{ $displayName }} Flash Contents
+                                            <span class="badge bg-primary ms-2">{{ count($folderData) }}</span>
+                                        </button>
+                                    </li>
+                                    @php $isFirst = false; @endphp
+                                @endif
+                            @endforeach
+                        </ul>
+
+                        <!-- Tabs Content -->
+                        <div class="tab-content" id="flashFolderTabsContent">
+                            @php $isFirstContent = true; @endphp
+                            @foreach ($flashFolderData as $folderName => $folderData)
+                                @if (!isset($folderData['error']) && !empty($folderData))
+                                    @php
+                                        $tabId = 'tab-' . md5($folderName);
+                                        $contentId = 'content-' . md5($folderName);
+                                        $displayName = (strpos($folderName, 'MOD') !== false) ? 'MOD' : 'ORIGINAL';
+                                        $tableId = 'table-' . md5($folderName);
+                                        $tbodyId = 'tbody-' . md5($folderName);
+                                        $paginationId = 'pagination-' . md5($folderName);
+                                        $tableInfoId = 'tableinfo-' . md5($folderName);
+                                        $entriesSelectId = 'entries-' . md5($folderName);
+                                    @endphp
+                                    <div class="tab-pane fade {{ $isFirstContent ? 'show active' : '' }}"
+                                         id="{{ $contentId }}"
+                                         role="tabpanel"
+                                         aria-labelledby="{{ $tabId }}">
+
+                                        <!-- Pagination Controls -->
+                                        <div class="pagination-controls mb-3">
+                                            <div class="entries-per-page">
+                                                <label for="{{ $entriesSelectId }}" class="form-label mb-0">Show:</label>
+                                                <select class="form-select form-select-sm"
+                                                        id="{{ $entriesSelectId }}"
+                                                        onchange="changeEntriesPerPage('{{ md5($folderName) }}', this.value)">
+                                                    <option value="25" selected>25</option>
+                                                    <option value="50">50</option>
+                                                    <option value="100">100</option>
+                                                    <option value="all">All</option>
+                                                </select>
+                                                <span>entries</span>
+                                            </div>
+                                        </div>
+
+                                        <!-- Table -->
+                                        <div class="table-responsive">
+                                            <table class="table table-striped" id="{{ $tableId }}">
+                                                <thead>
+                                                    <tr>
+                                                        <th>S.No</th>
+                                                        <th><i class="fas fa-file"></i> Name</th>
+                                                        <th><i class="fas fa-tag"></i> Type</th>
+                                                        <th><i class="fas fa-weight-hanging"></i> Size</th>
+                                                        <th><i class="fas fa-clock"></i> Last Modified</th>
+                                                        <th><i class="fas fa-check-circle"></i> Status</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody id="{{ $tbodyId }}">
+                                                    @forelse ($folderData as $index => $file)
+                                                        @php
+                                                            // Determine if file exists locally
+                                                            $subfolder = strpos($folderName, 'MOD') !== false ? 'MOD' : 'ORI';
+                                                            $localPath = 'flashfiles/' . $subfolder . '/' . ($file['name'] ?? '');
+                                                            $fileExists = Storage::exists($localPath);
+                                                            $sizeMatches = $fileExists &&
+                                                                          ($file['type'] === 'file') &&
+                                                                          Storage::size($localPath) === ($file['size'] ?? 0);
+                                                        @endphp
+                                                        <tr data-index="{{ $index }}">
+                                                            <td>{{ $index + 1 }}</td>
+                                                            <td>
+                                                                @if ($file['type'] === 'file')
+                                                                    <i class="fas fa-file text-primary"></i>
+                                                                @else
+                                                                    <i class="fas fa-folder text-warning"></i>
+                                                                @endif
+                                                                {{ $file['name'] }}
+                                                            </td>
+                                                            <td>
+                                                                @if ($file['type'] === 'file')
+                                                                    <span class="badge bg-primary">File</span>
+                                                                @else
+                                                                    <span class="badge bg-warning">Folder</span>
+                                                                @endif
+                                                            </td>
+                                                            <td>
+                                                                @if ($file['type'] === 'file' && isset($file['size']))
+                                                                    @if ($file['size'] > 1048576)
+                                                                        {{ round($file['size'] / 1048576, 2) }} MB
+                                                                    @elseif ($file['size'] > 1024)
+                                                                        {{ round($file['size'] / 1024, 2) }} KB
+                                                                    @else
+                                                                        {{ $file['size'] }} bytes
+                                                                    @endif
+                                                                @elseif ($file['type'] === 'folder' && isset($file['childCount']))
+                                                                    {{ $file['childCount'] }} items
+                                                                @else
+                                                                    -
+                                                                @endif
+                                                            </td>
+                                                            <td>
+                                                                @if (isset($file['lastModified']))
+                                                                    {{ \Carbon\Carbon::parse($file['lastModified'])->format('M d, Y H:i') }}
+                                                                @else
+                                                                    -
+                                                                @endif
+                                                            </td>
+                                                            <td>
+                                                                @if($file['type'] === 'file')
+                                                                    @if($fileExists && $sizeMatches)
+                                                                        <span class="badge bg-success">Synced</span>
+                                                                    @elseif($fileExists)
+                                                                        <span class="badge bg-warning">Size mismatch</span>
+                                                                    @else
+                                                                        <span class="badge bg-danger">Not synced</span>
+                                                                    @endif
+                                                                @else
+                                                                    <span class="badge bg-info">Folder</span>
+                                                                @endif
+                                                            </td>
+                                                        </tr>
+                                                    @empty
+                                                        <tr>
+                                                            <td colspan="6" class="text-center text-muted">
+                                                                <i class="fas fa-folder-open"></i> No files found
+                                                            </td>
+                                                        </tr>
+                                                    @endforelse
+                                                </tbody>
+                                            </table>
+                                        </div>
+
+                                        <!-- Pagination -->
+                                        <nav aria-label="Page navigation" id="{{ $paginationId }}">
+                                            <ul class="pagination justify-content-center">
+                                                <!-- Pagination will be dynamically generated -->
+                                            </ul>
+                                        </nav>
+
+                                        <!-- Table info -->
+                                        <div class="d-flex justify-content-between align-items-center mt-3">
+                                            <div class="text-muted" id="{{ $tableInfoId }}">
+                                                <!-- Table info will be dynamically updated -->
+                                            </div>
+                                        </div>
+                                    </div>
+                                    @php $isFirstContent = false; @endphp
+                                @endif
+                            @endforeach
                         </div>
-                    @endif
-                @endforeach
+                    </div>
+                </div>
             @endif
         @endif
 
@@ -387,86 +467,143 @@
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script>
+        // Pagination functionality
+        const tablesData = {};
+
+        // Initialize pagination for each table
         document.addEventListener('DOMContentLoaded', function() {
-            const processForm = document.getElementById('processForm');
-            const progressContainer = document.getElementById('progressContainer');
-            const progressBar = document.getElementById('progressBar');
-            const progressText = document.getElementById('progressText');
-            const fileProcessingLog = document.getElementById('fileProcessingLog');
-            const processButton = document.getElementById('processButton');
-
-            if (processForm) {
-                processForm.addEventListener('submit', function(e) {
-                    e.preventDefault();
-
-                    // Show progress container
-                    progressContainer.style.display = 'block';
-                    processButton.disabled = true;
-                    processButton.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Processing...';
-
-                    // Create an EventSource connection to listen for progress updates
-                    const eventSource = new EventSource("{{ route('onedrive.process-flash') }}?local_path=" +
-                        encodeURIComponent(document.getElementById('process_path').value));
-
-                    eventSource.onmessage = function(event) {
-                        const data = JSON.parse(event.data);
-
-                        if (data.progress) {
-                            progressBar.style.width = data.progress + '%';
-                            progressText.textContent = data.message;
-
-                            // Add log entry
-                            const logEntry = document.createElement('div');
-                            logEntry.className = 'log-entry';
-
-                            if (data.type === 'success') {
-                                logEntry.classList.add('log-success');
-                                logEntry.innerHTML = '<i class="fas fa-check-circle"></i> ' + data.message;
-                            } else if (data.type === 'error') {
-                                logEntry.classList.add('log-error');
-                                logEntry.innerHTML = '<i class="fas fa-exclamation-circle"></i> ' + data.message;
-                            } else if (data.type === 'warning') {
-                                logEntry.classList.add('log-warning');
-                                logEntry.innerHTML = '<i class="fas fa-exclamation-triangle"></i> ' + data.message;
-                            } else {
-                                logEntry.classList.add('log-info');
-                                logEntry.innerHTML = '<i class="fas fa-info-circle"></i> ' + data.message;
-                            }
-
-                            fileProcessingLog.appendChild(logEntry);
-                            fileProcessingLog.scrollTop = fileProcessingLog.scrollHeight;
-                        }
-
-                        if (data.complete) {
-                            progressBar.style.width = '100%';
-                            progressText.textContent = data.message;
-                            eventSource.close();
-                            processButton.disabled = false;
-                            processButton.innerHTML = '<i class="fas fa-cog"></i> Process Complete';
-
-                            // Show completion message
-                            const logEntry = document.createElement('div');
-                            logEntry.className = 'log-entry log-success';
-                            logEntry.innerHTML = '<i class="fas fa-check-circle"></i> Processing complete!';
-                            fileProcessingLog.appendChild(logEntry);
-                            fileProcessingLog.scrollTop = fileProcessingLog.scrollHeight;
-
-                            // Reload the page after 3 seconds to show updated status
-                            setTimeout(function() {
-                                window.location.reload();
-                            }, 3000);
-                        }
-                    };
-
-                    eventSource.onerror = function() {
-                        progressText.textContent = 'Connection error occurred';
-                        processButton.disabled = false;
-                        processButton.innerHTML = '<i class="fas fa-cog"></i> Try Again';
-                        eventSource.close();
-                    };
-                });
-            }
+            const tables = document.querySelectorAll('[id^="table-"]');
+            tables.forEach(table => {
+                const folderHash = table.id.replace('table-', '');
+                initializeTable(folderHash);
+            });
         });
+
+        function initializeTable(folderHash) {
+            const tbody = document.getElementById('tbody-' + folderHash);
+            if (!tbody) return;
+
+            const rows = Array.from(tbody.getElementsByTagName('tr'));
+
+            tablesData[folderHash] = {
+                allRows: rows,
+                currentPage: 1,
+                entriesPerPage: 25,
+                totalEntries: rows.length
+            };
+
+            updateTable(folderHash);
+        }
+
+        function changeEntriesPerPage(folderHash, value) {
+            if (!tablesData[folderHash]) return;
+
+            tablesData[folderHash].entriesPerPage = value === 'all' ? tablesData[folderHash].totalEntries : parseInt(value);
+            tablesData[folderHash].currentPage = 1;
+            updateTable(folderHash);
+        }
+
+        function goToPage(folderHash, page) {
+            if (!tablesData[folderHash]) return;
+
+            tablesData[folderHash].currentPage = page;
+            updateTable(folderHash);
+        }
+
+        function updateTable(folderHash) {
+            const data = tablesData[folderHash];
+            if (!data) return;
+
+            const tbody = document.getElementById('tbody-' + folderHash);
+            const pagination = document.getElementById('pagination-' + folderHash);
+            const tableInfo = document.getElementById('tableinfo-' + folderHash);
+
+            if (!tbody) return;
+
+            // Clear current tbody
+            tbody.innerHTML = '';
+
+            // Calculate pagination
+            const totalPages = Math.ceil(data.totalEntries / data.entriesPerPage);
+            const startIndex = (data.currentPage - 1) * data.entriesPerPage;
+            const endIndex = Math.min(startIndex + data.entriesPerPage, data.totalEntries);
+
+            // Show relevant rows
+            for (let i = startIndex; i < endIndex; i++) {
+                if (data.allRows[i]) {
+                    // Update row number
+                    const firstCell = data.allRows[i].querySelector('td:first-child');
+                    if (firstCell) {
+                        firstCell.textContent = i + 1;
+                    }
+                    tbody.appendChild(data.allRows[i]);
+                }
+            }
+
+            // Update pagination
+            updatePagination(folderHash, totalPages);
+
+            // Update table info
+            if (tableInfo) {
+                const showing = data.totalEntries === 0 ? 0 : startIndex + 1;
+                tableInfo.textContent = `Showing ${showing} to ${endIndex} of ${data.totalEntries} entries`;
+            }
+        }
+
+        function updatePagination(folderHash, totalPages) {
+            const pagination = document.getElementById('pagination-' + folderHash);
+            if (!pagination) return;
+
+            const currentPage = tablesData[folderHash].currentPage;
+
+            if (totalPages <= 1) {
+                pagination.innerHTML = '';
+                return;
+            }
+
+            let paginationHTML = '<ul class="pagination justify-content-center">';
+
+            // Previous button
+            paginationHTML += `<li class="page-item ${currentPage === 1 ? 'disabled' : ''}">
+                <a class="page-link" href="#" onclick="goToPage('${folderHash}', ${currentPage - 1}); return false;">Previous</a>
+            </li>`;
+
+            // Page numbers
+            const startPage = Math.max(1, currentPage - 2);
+            const endPage = Math.min(totalPages, currentPage + 2);
+
+            if (startPage > 1) {
+                paginationHTML += `<li class="page-item">
+                    <a class="page-link" href="#" onclick="goToPage('${folderHash}', 1); return false;">1</a>
+                </li>`;
+                if (startPage > 2) {
+                    paginationHTML += '<li class="page-item disabled"><span class="page-link">...</span></li>';
+                }
+            }
+
+            for (let i = startPage; i <= endPage; i++) {
+                paginationHTML += `<li class="page-item ${i === currentPage ? 'active' : ''}">
+                    <a class="page-link" href="#" onclick="goToPage('${folderHash}', ${i}); return false;">${i}</a>
+                </li>`;
+            }
+
+            if (endPage < totalPages) {
+                if (endPage < totalPages - 1) {
+                    paginationHTML += '<li class="page-item disabled"><span class="page-link">...</span></li>';
+                }
+                paginationHTML += `<li class="page-item">
+                    <a class="page-link" href="#" onclick="goToPage('${folderHash}', ${totalPages}); return false;">${totalPages}</a>
+                </li>`;
+            }
+
+            // Next button
+            paginationHTML += `<li class="page-item ${currentPage === totalPages ? 'disabled' : ''}">
+                <a class="page-link" href="#" onclick="goToPage('${folderHash}', ${currentPage + 1}); return false;">Next</a>
+            </li>`;
+
+            paginationHTML += '</ul>';
+            pagination.innerHTML = paginationHTML;
+        }
     </script>
 </body>
 </html>

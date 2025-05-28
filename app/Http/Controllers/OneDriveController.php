@@ -163,9 +163,9 @@ class OneDriveController extends Controller
    // Add this new method to your OneDriveController
    public function processFlashProducts(Request $request)
    {
-      dd($request->all());
       try {
-         $result = $this->oneDriveService->processFlashFiles($this->option('local-path'));
+         $result = $this->oneDriveService->processFlashFiles($request->input('local_path', 'flashfiles'));
+
 
          if ($result['success']) {
             $message = sprintf(

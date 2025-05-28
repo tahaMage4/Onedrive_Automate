@@ -35,7 +35,8 @@ class OneDriveService
     */
    public function getAuthUrl(): string
    {
-      $scopes = 'offline_access https://graph.microsoft.com/Sites.Read.All https://graph.microsoft.com/Files.Read.All https://graph.microsoft.com/User.Read';
+      // $scopes = 'offline_access https://graph.microsoft.com/Sites.Read.All https://graph.microsoft.com/Files.Read.All https://graph.microsoft.com/User.Read';
+      $scopes = 'offline_access https://graph.microsoft.com/.default';
       return 'https://login.microsoftonline.com/' . $this->tenantId . '/oauth2/v2.0/authorize?' . http_build_query([
          'client_id' => $this->clientId,
          'response_type' => 'code',
@@ -73,9 +74,10 @@ class OneDriveService
                'client_id' => $this->clientId,
                'client_secret' => $this->clientSecret,
                'code' => $authCode,
-               'grant_type' => 'client_credentials', // authorization_code
+               'grant_type' => 'authorization_code', //  client_credentials
                'redirect_uri' => $this->redirectUri,
-               'scope' => 'offline_access https://graph.microsoft.com/Sites.Read.All https://graph.microsoft.com/Files.Read.All https://graph.microsoft.com/User.Read',
+               // 'scope' => 'offline_access https://graph.microsoft.com/Sites.Read.All https://graph.microsoft.com/Files.Read.All https://graph.microsoft.com/User.Read',
+               'scope' => 'https://graph.microsoft.com/.default',
             ],
          ]);
 
@@ -111,7 +113,8 @@ class OneDriveService
                'client_secret' => $this->clientSecret,
                'grant_type' => 'refresh_token',
                'refresh_token' => $refreshToken,
-               'scope' => 'offline_access https://graph.microsoft.com/Sites.Read.All https://graph.microsoft.com/Files.Read.All https://graph.microsoft.com/User.Read',
+               // 'scope' => 'offline_access https://graph.microsoft.com/Sites.Read.All https://graph.microsoft.com/Files.Read.All https://graph.microsoft.com/User.Read',
+               'scope' => 'https://graph.microsoft.com/.default',
             ],
          ]);
 
@@ -750,7 +753,55 @@ class OneDriveService
    /**
     * Process files from the flashfiles folder with category and product management
     */
-   public function processFlashFiles(string $localBasePath = 'flashfiles'): array
+   // public function processFlashFiles(string $localBasePath = 'flashfiles'): array
+   // {
+   //    $result = [
+   //       'success' => false,
+   //       'created_categories' => 0,
+   //       'created_products' => 0,
+   //       'updated_products' => 0,
+   //       'skipped_products' => 0,
+   //       'errors' => [],
+   //    ];
+
+   //    try {
+   //       if (!Storage::exists($localBasePath)) {
+   //          $result['errors'][] = "Base directory {$localBasePath} does not exist";
+   //          return $result;
+   //       }
+
+   //       // Get all subdirectories in flashfiles
+   //       $subdirectories = Storage::directories($localBasePath);
+   //       $allFiles = [];
+
+   //       foreach ($subdirectories as $subdirectory) {
+   //          $folderName = basename($subdirectory);
+
+   //          // Get or create category
+   //          $category = $this->getOrCreateFlashCategory($folderName);
+   //          if (!$category) {
+   //             $result['errors'][] = "Failed to create category for {$folderName}";
+   //             continue;
+   //          }
+
+   //          // Process files in the subdirectory
+   //          $files = Storage::allFiles($subdirectory);
+
+   //          foreach ($files as $file) {
+   //             $this->processFlashFile($file, $category, $result);
+   //          }
+   //       }
+
+   //       $result['success'] = true;
+   //       return $result;
+   //    } catch (\Exception $e) {
+   //       Log::error("Error processing flash files: " . $e->getMessage());
+   //       $result['errors'][] = "System error: " . $e->getMessage();
+   //       return $result;
+   //    }
+   // }
+
+   public function processFlashFiles(string $localBasePath = 'flashfiles', int $batchSize = 50, int $delay = 10): array
    {
       $result = [
          'success' => false,
@@ -769,6 +820,7 @@ class OneDriveService
 
          // Get all subdirectories in flashfiles
          $subdirectories = Storage::directories($localBasePath);
+         $processedCount = 0;
 
          foreach ($subdirectories as $subdirectory) {
             $folderName = basename($subdirectory);
@@ -779,12 +831,22 @@ class OneDriveService
                $result['errors'][] = "Failed to create category for {$folderName}";
                continue;
             }
+            $result['created_categories']++;
 
-            // Process files in the subdirectory
+            // Process files in the subdirectory in batches
             $files = Storage::allFiles($subdirectory);
+            $batches = array_chunk($files, $batchSize);
 
-            foreach ($files as $file) {
-               $this->processFlashFile($file, $category, $result);
+            foreach ($batches as $batch) {
+               foreach ($batch as $file) {
+                  $this->processFlashFile($file, $category, $result);
+                  $processedCount++;
+               }
+
+               // Delay between batches if there are more files to process
+               if ($processedCount < count($files)) {
+                  sleep($delay);
+               }
             }
          }
 
@@ -796,6 +858,7 @@ class OneDriveService
          return $result;
       }
    }
+
 
    /**
     * Get or create a category for flash files

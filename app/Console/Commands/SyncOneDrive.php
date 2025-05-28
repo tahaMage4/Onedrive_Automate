@@ -14,7 +14,9 @@ class SyncOneDrive extends Command
                             {--list : List files in SharePoint folder without downloading}
                             {--force-refresh : Force refresh the access token before sync}
                             {--local-path=flashfiles : Local storage path relative to storage/app}
-                            {--process : Process downloaded flash files into products}';
+                            {--process : Process downloaded flash files into products}
+                            {--batch-size=50 : Number of products to process at once}
+                            {--delay=10 : Delay in seconds between batches}';
 
    protected $description = 'Sync files from SharePoint OneDrive to local storage';
 
@@ -278,7 +280,7 @@ class SyncOneDrive extends Command
       $this->newLine();
       $this->info('Authentication Help:');
       $this->line('1. Start your Laravel server: php artisan serve');
-      $this->line('2. Visit: http://localhost:8000/onedrive/login');
+      $this->line('2. Visit: ' . config('app.url') . '/onedrive/login');
       $this->line('3. Complete the Microsoft authentication');
       $this->line('4. Run this command again');
       $this->newLine();
@@ -291,8 +293,15 @@ class SyncOneDrive extends Command
    {
       $this->info('Processing flash files into products...');
 
+      $batchSize = (int)$this->option('batch-size');
+      $delay = (int)$this->option('delay');
+
       try {
-         $result = $this->drive->processFlashFiles($this->option('local-path'));
+         $result = $this->drive->processFlashFiles(
+            $this->option('local-path'),
+            $batchSize,
+            $delay
+         );
 
          if ($result['success']) {
             $this->info(sprintf(
